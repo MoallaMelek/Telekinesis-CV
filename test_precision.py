@@ -179,17 +179,20 @@ class EditorTests(unittest.TestCase):
     def test_refining_held_silhouette_preserves_pixels_relative_to_grip(self):
         group, sprite = self.app.extract(self.frame, rect_mask(100, 100, 160, 160), 0, 1)
         obj = self.app.manip.add(group, sprite)
+        obj.scale, obj.angle = 1.4, 25
         hand = self.app.manip.hands[2]
         hand.grip = hand.pinch_point = np.array([300., 230.])
         self.app.manip.grab(2, obj, 0)
+        hand.pinch.state = 'PINCHED'
+        self.app.mouse.update(point=(300, 230), down=True)
         before = obj.position - obj.matrix()[:, :2] @ obj.home_position() - hand.grip
         self.app.refining = (1, 1000001, 1, np.zeros(2))
         new_mask = rect_mask(100, 100, 170, 160)
         result = MaskResult(1000001, 1000001, None, [candidate(new_mask)], 0, 0, 0, 0,
                             fake_embedding(self.frame, 1000001, 1))
-        self.app.finish_refine(result, 2)
-        hand.grip += (20, 5)
-        self.app.manip.update_objects(2.1, .04)
+        self.worker.poll.return_value = ('refine', result)
+        self.app.mouse['point'] = (320, 235)
+        self.app.step(self.frame, 2.1, .04, [])
         after = obj.position - obj.matrix()[:, :2] @ obj.home_position() - hand.grip
         np.testing.assert_allclose(after, before)
 

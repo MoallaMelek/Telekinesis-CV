@@ -188,8 +188,8 @@ class App:
                               flush=True)
                 else:
                     self.counters["rejected_stale"] += 1
-            elif kind == "refine":
-                self.finish_refine(result, now)
+            # Refinement is applied after this frame's motion below. Rebasing here
+            # would anchor yesterday's image pose to today's grip and lose movement.
 
         # 2) Gesture events.
         for slot, event in events:
@@ -212,6 +212,8 @@ class App:
                 group.tracker.update(frame, occluder, now)
             self.schedule_refine(frame, core, now)
         self.manip.update_objects(now, dt)
+        if polled is not None and polled[0] == "refine":
+            self.finish_refine(polled[1], now)
         person = self.scene_person(core) if self.manip.objects else self.person() if self.debug else None
 
         # 4) Composite: live -> reconstructed originals -> sprites -> hands in front.

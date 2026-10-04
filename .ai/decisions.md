@@ -52,5 +52,8 @@
   objects. Selected pixel ownership overrides false selfie foreground downstream.
 - Copy MediaPipe's borrowed selfie buffers explicitly before native results are released.
   A local diagnostic reproduced the memory access violation before this fix.
+- Fast hosted inference exposed held-image drift: refinement rebased the old image pose
+  against the current grip before motion. Apply polled refinement after motion so current
+  image and grip agree; test through App.step with a moving hand and delivered result.
 - Preserve EdgeSAM CPU inference and avoid costly new models/cloud/class-based detectors.
   General prompting supplies missing intent; it cannot guarantee perfect segmentation.
