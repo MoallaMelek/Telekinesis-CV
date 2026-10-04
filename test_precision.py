@@ -162,6 +162,20 @@ class EditorTests(unittest.TestCase):
         self.app.schedule_refine(self.frame, np.zeros(mask.shape, bool), 3)
         self.worker.request.assert_not_called()
 
+    def test_new_selection_guidance_takes_precedence_over_existing_objects(self):
+        group, sprite = self.app.extract(self.frame, rect_mask(100, 100, 180, 180), 0, 1)
+        self.app.manip.add(group, sprite)
+        self.app.selector.result = MaskResult(1, 1, None,
+                                              [candidate(rect_mask(250, 150, 300, 220))], 0, 0, 0, 0)
+        self.app.selector.choice = 0
+        for state, stage in [('PREVIEW', 2), ('ANALYZING', 1)]:
+            self.app.selector.state = state
+            with patch('main.draw_hud', return_value=80) as hud:
+                self.app.draw_feedback(self.frame.copy(), self.frame, 1, None, None,
+                                       np.zeros((480, 640)), np.zeros((480, 640), bool))
+            self.assertEqual(hud.call_args.kwargs['stage'], stage)
+            self.assertIn('S precise selection', hud.call_args.kwargs['hint'])
+
 
 if __name__ == '__main__':
     unittest.main()

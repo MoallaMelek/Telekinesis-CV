@@ -665,10 +665,15 @@ class App:
         if hidden:
             summary += f" / {hidden} hidden"
         holding = any(o.holders for o in m.objects)
-        stage = 3 if holding else 2 if s.state == "PREVIEW" or self.pending_lock else 3 if m.objects else 1
+        previewing = s.state == "PREVIEW" or self.pending_lock is not None
+        selecting = s.state in ("AIMING", "ANALYZING", "NO_OBJECT")
+        if not holding and (previewing or selecting):
+            summary = "New object outline" if previewing else "Finding object" if s.state == "ANALYZING" else summary
+        stage = 3 if holding else 2 if previewing else 1 if selecting else 3 if m.objects else 1
         hint = ("Open fingers to place / R reset / K help / Q quit" if holding else
-                "R reset / H hide / Esc restore / K help / Q quit" if m.objects else
-                "M change outline / S precise selection / K help / Q quit" if s.state == "PREVIEW" else
+                "M change outline / S precise selection / K help / Q quit" if previewing else
+                "Click to select / S precise selection / K help / Q quit" if selecting else
+                "R reset / H hide / S precise selection / Esc restore / K help / Q quit" if m.objects else
                 "Click to select / S precise selection / K help / Q quit")
         self.hud_bottom = draw_hud(out, self.status(now), summary, message,
                                   bool(lost), self.show_keys and not self.debug, stage=stage, hint=hint)
