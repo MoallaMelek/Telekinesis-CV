@@ -193,3 +193,19 @@ def draw_landmarks(frame, points, debug=False):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA)
             cv2.putText(frame, label, (center[0] + 9, center[1] - 7),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
+
+
+def draw_hand_skeleton(frame, points, pinched=False):
+    """Always-visible tracking feedback, with readable bones and thumb/index tips."""
+    pixels = np.rint(points).astype(int)
+    colour = (120, 255, 140) if pinched else (255, 220, 90)
+    for a, b in CONNECTIONS:
+        start, end = tuple(pixels[a]), tuple(pixels[b])
+        cv2.line(frame, start, end, (12, 18, 22), 5, cv2.LINE_AA)
+        cv2.line(frame, start, end, colour, 2, cv2.LINE_AA)
+    for i, p in enumerate(pixels):
+        tip = i in (4, 8)
+        cv2.circle(frame, tuple(p), 6 if tip else 4, (12, 18, 22), -1, cv2.LINE_AA)
+        cv2.circle(frame, tuple(p), 3 if tip else 2,
+                   (60, 200, 255) if i == 4 else colour if i == 8 else (235, 240, 245),
+                   -1, cv2.LINE_AA)

@@ -13,7 +13,7 @@ import time
 import cv2
 import numpy as np
 
-from hand_tracker import CONNECTIONS, HandTracker
+from hand_tracker import HandTracker, draw_hand_skeleton
 from manipulation import Group, Manipulator, Sprite, render_sprite
 from scene import (ObjectTracker, PersonSegmenter, Reconstruction, SceneMemory, bbox_of,
                    feathered_alpha, make_inpainter)
@@ -66,7 +66,7 @@ class App:
         self.refine_counter = 10 ** 6  # refine jobs use their own id range
         self.debug = args.debug
         self.occlusion = "hands"
-        self.show_keys = True
+        self.show_keys = False
         self.messages = deque(maxlen=3)
         self.mouse = {"point": None, "down": False, "moved": -10.0}
         self.pointer_slot = None
@@ -503,9 +503,16 @@ class App:
             cv2.drawContours(out, contours, -1, CYAN, 1, cv2.LINE_AA)
         if hovering is not None and not hovering.holders:
             cv2.circle(out, ipt(hovering.position), 5, GREEN, 1, cv2.LINE_AA)
+        # Show actual detections in normal use; grace-period poses are stale, not live hands.
+        real_hands = [hand for hand in m.hands[:2] if hand.present and not hand.missing]
+        for hand in real_hands:
+            draw_hand_skeleton(out, hand.points, hand.pinch.pinched)
         # Reticle at the aim point; an arc shows dwell/analysis progress.
         if aim is not None:
             centre = ipt(aim)
+            if self.pointer_slot in (0, 1):
+                cv2.line(out, ipt(m.hands[self.pointer_slot].points[8]), centre, CYAN, 1, cv2.LINE_AA)
+            text(out, "TARGET", (centre[0] + 15, centre[1] - 12), CYAN, .35)
             colour = CYAN if s.state == "PREVIEW" else WHITE
             cv2.circle(out, centre, 7, (20, 20, 20), 3, cv2.LINE_AA)
             cv2.circle(out, centre, 7, colour, 1, cv2.LINE_AA)
@@ -541,45 +548,55 @@ class App:
         hidden = sum(1 for o in m.objects if not o.visible)
         lost = [g for g in self.groups() if g.tracker.state.startswith("LOST")]
         message = self.messages[-1][0] if self.messages and now < self.messages[-1][1] else None
-        summary = f"{len(m.objects)} objects"
+        summary = "Hand detected" if real_hands else "No hand detected"
+        if len(real_hands) == 2:
+            summary = "2 hands detected"
+        if self.pointer_slot == 2:
+            summary = "Mouse control"
         if m.active is not None:
-            summary += f" / active {m.active}"
+            summary = f"Object {m.active} selected"
         if hidden:
             summary += f" / {hidden} hidden"
+        holding = any(o.holders for o in m.objects)
+        stage = 3 if holding or m.objects else 2 if s.state == "PREVIEW" or self.pending_lock else 1
+        hint = ("Open fingers to place / R reset / K help / Q quit" if holding else
+                "R reset / H hide / Esc restore / K help / Q quit" if m.objects else
+                "M change outline / K help / Q quit" if s.state == "PREVIEW" else
+                "Mouse also works / K help / Q quit")
         self.hud_bottom = draw_hud(out, self.status(now), summary, message,
-                                  bool(lost), self.show_keys and not self.debug)
+                                  bool(lost), self.show_keys and not self.debug, stage=stage, hint=hint)
         if self.debug:
             self.draw_debug(out, now, aim, person, zone)
 
     def status(self, now):
         s, m = self.selector, self.manip
         if self.worker.error:
-            return "Model unavailable. Press E to retry; details are in the console."
+            return "Object selection unavailable. Press E to retry loading."
         if not self.worker.ready and self.worker.model is None:
-            return "Loading the segmentation model..."
+            return "Getting ready... Wait for object selection to finish loading."
         held = [o for o in m.objects if o.holders]
         if held:
             if len(held[0].holders) > 1:
-                return "Spread / close hands to scale - turn them to rotate"
-            return "Move it - release to place - flick + release to throw - 2nd hand pinch: scale"
+                return "Move hands apart to enlarge. Turn your hands to rotate."
+            return "Keep pinching and move your hand. Open your fingers to place it."
         if self.pending_lock:
-            return "Keep pinching - finding the object..."
+            return "Keep pinching. Your object is still being found..."
         if s.state == "PREVIEW":
-            return "Pinch to grab this object   (M / right-click: other outline)"
+            return "Outline looks right? Pinch your thumb and index finger together."
         if s.state == "ANALYZING":
-            return "Finding the object..."
+            return "Finding your object... Keep the target ring in place."
         if s.state == "AIMING":
-            return "Hold still on the object..."
+            return "Keep the target ring on the object. Hold your finger still."
         if s.state == "NO_OBJECT":
-            return "No clear object there - try touching its centre"
+            return "No object found. Move the target ring to the object's centre."
         if m.objects:
             obj = self.active()
             if obj is not None and not obj.visible:
-                return "Active object hidden. H shows it; Tab chooses another object."
-            return "Pinch or drag an image to grab it. H hides; R resets; Esc restores reality."
+                return "Your object is hidden. Press H to show it again."
+            return "Object placed. Pinch its image to pick it up again."
         if not any(h.present for h in m.hands[:2]) and self.pointer_slot != 2:
-            return "Raise a hand or use the mouse to touch an object's image"
-        return "Touch a real object in the image with your fingertip"
+            return "Raise one hand with your index finger extended, or use the mouse."
+        return "Point at an object. Put the TARGET ring over its image."
 
     def draw_debug(self, out, now, aim, person, zone):
         m, s = self.manip, self.selector
@@ -615,12 +632,6 @@ class App:
             y += 15
         for slot, hand in enumerate(m.hands[:2]):
             if hand.present:
-                pts = np.rint(hand.points).astype(int)
-                for a, b in CONNECTIONS:
-                    cv2.line(out, tuple(pts[a]), tuple(pts[b]), (140, 230, 150), 1, cv2.LINE_AA)
-                for p in pts:
-                    cv2.circle(out, tuple(p), 2, WHITE, -1, cv2.LINE_AA)
-                cv2.circle(out, tuple(pts[8]), 4, (0, 255, 255), -1, cv2.LINE_AA)
                 for p in negative_prompts(hand.points):
                     cv2.drawMarker(out, ipt(p), (60, 60, 255), cv2.MARKER_TILTED_CROSS, 8, 1)
         if s.result is not None and s.result.point is not None:

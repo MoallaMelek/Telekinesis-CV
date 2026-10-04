@@ -30,7 +30,7 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements.txt
       - run: python -m pip check
-      - run: python -m compileall -q main.py hand_tracker.py manipulation.py segmentation.py selection.py scene.py hud.py model_assets.py tools
+      - run: python -m compileall -q main.py hand_tracker.py manipulation.py segmentation.py selection.py scene.py hud.py model_assets.py lighting.py tools
       - run: python -m unittest test_core test_selection test_reliability
 
   real-model:

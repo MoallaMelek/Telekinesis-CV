@@ -92,10 +92,10 @@ class RankingTests(unittest.TestCase):
 
     def test_clean_mask_keeps_prompted_component_and_fills_holes(self):
         m = rect_mask(100, 100, 200, 200)
-        m[140:150, 140:150] = False            # specular highlight hole
+        m[140:144, 140:144] = False            # tiny segmentation speckle
         m[300:305, 300:305] = True             # unrelated speck
         cleaned = clean_mask(m, (120, 120))
-        self.assertTrue(cleaned[145, 145])
+        self.assertTrue(cleaned[142, 142])
         self.assertFalse(cleaned[302, 302])
 
 
@@ -181,6 +181,7 @@ class SelectorTests(unittest.TestCase):
         self.assertIsNotNone(job2.frame)
 
     def test_carousel_cycles_outlines_while_pointing_steadily(self):
+        self.s.carousel = 1.6  # explicit opt-in; normal pointing keeps a steady preview
         job = self.settle((100, 100))
         small, large = rect_mask(80, 80, 120, 120), rect_mask(50, 50, 180, 180)
         embedding = fake_embedding(job.frame, job.snapshot_id, .3)
@@ -191,6 +192,14 @@ class SelectorTests(unittest.TestCase):
         self.assertEqual(self.s.choice, 0)             # next outline after 1.6 s
         self.aim((100, 100), 3.8)
         self.assertEqual(self.s.choice, 1)             # wraps around
+
+    def test_default_preview_does_not_change_while_pointing(self):
+        job = self.settle((100, 100))
+        masks = [candidate(rect_mask(80, 80, 120, 120)), candidate(rect_mask(50, 50, 180, 180))]
+        self.s.accept(MaskResult(job.snapshot_id, job.prompt_id, (100, 100), masks, 1, 0, 0, 0,
+                                  fake_embedding(job.frame, job.snapshot_id, .3)), .4)
+        self.aim((100, 100), 5)
+        self.assertEqual(self.s.choice, 1)
 
     def test_camera_gap_restarts_dwell_and_hand_loss_clears(self):
         self.aim((100, 100), 0)

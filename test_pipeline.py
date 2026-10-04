@@ -7,6 +7,7 @@ This proves the pipeline mechanics; it does not prove webcam behaviour with real
 """
 import time
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -102,6 +103,38 @@ class SegmentationQualityTests(unittest.TestCase):
         mirrored = self.select(cv2.flip(self.scene, 1), (639 - 360, 300))
         self.assertGreater(iou(cv2.flip(mask.astype(np.uint8), 1).astype(bool), mirrored), .95)
 
+    def test_dark_noisy_selection_improves_without_changing_the_sprite_pixels(self):
+        rng = np.random.default_rng(42)
+        rng.normal(0, 8, self.scene.shape)  # same controlled fixture as the precision probe
+        dim = np.clip(self.scene.astype(float) * .18 + rng.normal(0, 8, self.scene.shape), 0, 255).astype(np.uint8)
+        with patch("segmentation.enhance_low_light", side_effect=lambda frame: frame):
+            baseline = self.select(dim, (530, 300))
+        improved = self.select(dim, (530, 300))
+        before, after = iou(baseline, self.truth["bottle"]), iou(improved, self.truth["bottle"])
+        self.assertGreater(after, .93)
+        self.assertGreater(after - before, .03)
+        embedding = self.model.encode(dim)
+        np.testing.assert_array_equal(embedding.frame, dim)
+
+    def test_shadow_crossing_object_keeps_the_right_silhouette(self):
+        y, x = np.indices(self.scene.shape[:2])
+        gain = np.where((x > 180) & (y > 220), .45, 1.)
+        shadow = (self.scene.astype(float) * gain[..., None]).astype(np.uint8)
+        for name, point in (("mug", (160, 260)), ("phone", (360, 300)), ("bottle", (530, 300))):
+            mask = self.select(shadow, point)
+            self.assertGreater(iou(mask, self.truth[name]), .90, name)
+
+    def test_focused_boundary_pass_improves_shadowed_bottle(self):
+        y, x = np.indices(self.scene.shape[:2])
+        gain = np.where((x > 180) & (y > 220), .45, 1.)
+        shadow = (self.scene.astype(float) * gain[..., None]).astype(np.uint8)
+        embedding = self.model.encode(shadow)
+        candidates = self.model.decode(embedding, [(530, 300)])
+        coarse = candidates[rank_candidates(candidates)]
+        focused = self.model.refine_candidate(embedding, coarse, [(530, 300)])
+        self.assertGreater(iou(focused.mask, self.truth["bottle"]), .98)
+        self.assertGreater(iou(focused.mask, self.truth["bottle"]) - iou(coarse.mask, self.truth["bottle"]), .02)
+
 
 @unittest.skipUnless(HAVE_MODEL, "EdgeSAM model not downloaded; run the app once")
 class AppFlowTests(unittest.TestCase):
@@ -184,9 +217,11 @@ class AppFlowTests(unittest.TestCase):
         self.hold([(make_hand((415, 320), palm=70, pinch=True), "Right")], 6)
         self.hold([(make_hand((415, 320), palm=70), "Right")], 4)
         self.assertEqual(obj.mode, "floating")
-        placed = obj.position.copy()
+        # Refinement can change the centroid; compare the image transform relative to
+        # the physical object rather than requiring its centroid to remain identical.
+        placed = obj.position - obj.matrix()[:, :2] @ obj.home_position()
         self.hold([], 5)
-        np.testing.assert_allclose(obj.position, placed)
+        np.testing.assert_allclose(obj.position - obj.matrix()[:, :2] @ obj.home_position(), placed)
         # Hide -> region shows background; show; reset -> back home.
         self.assertGreater(self.red_fraction(self.out, self.sprite_mask(obj)), .5)
         app.key(ord("h"), self.t)

@@ -15,7 +15,9 @@ from hud import draw_hud, wrap_text, FONT
 from main import App, parse_args, shifted
 from manipulation import Manipulator
 from model_assets import ensure_asset
-from segmentation import MaskResult, SegmentationWorker, rank_candidates
+from segmentation import EdgeSAM, MaskResult, SegmentationWorker, rank_candidates, clean_mask, stability_score
+from scene import feathered_alpha
+from lighting import enhance_low_light
 from selection import Selector, hand_zone
 from test_core import make_object, make_hand
 from test_selection import candidate, fake_embedding, rect_mask, textured
@@ -69,6 +71,89 @@ class AssetTests(unittest.TestCase):
 
 
 class RankingRecoveryTests(unittest.TestCase):
+    def test_focused_pass_cannot_switch_to_another_object(self):
+        model = object.__new__(EdgeSAM)
+        coarse = candidate(rect_mask(20, 20, 70, 80), stability=.90)
+        unrelated = candidate(rect_mask(100, 100, 180, 190), stability=.99)
+        model.decode = Mock(return_value=[unrelated])
+        self.assertIs(model.refine_candidate(None, coarse, [(40, 40)]), coarse)
+
+    def test_focused_pass_accepts_agreeing_more_stable_boundary(self):
+        model = object.__new__(EdgeSAM)
+        coarse = candidate(rect_mask(20, 20, 70, 80), stability=.90)
+        focused = candidate(rect_mask(21, 21, 70, 80), stability=.98)
+        model.decode = Mock(return_value=[focused])
+        self.assertIs(model.refine_candidate(None, coarse, [(40, 40)]), focused)
+
+    def test_focus_rejects_weaker_score_and_more_hand_pixels(self):
+        model = object.__new__(EdgeSAM)
+        coarse = candidate(rect_mask(20, 20, 70, 80), score=.95, stability=.90)
+        weak = candidate(coarse.mask.copy(), score=.55, stability=.99)
+        hand = candidate(coarse.mask.copy(), score=.95, stability=.99, overlap=.15)
+        model.decode = Mock(return_value=[weak, hand])
+        self.assertIs(model.refine_candidate(None, coarse, [(40, 40)]), coarse)
+
+    def test_nearby_equal_sized_neighbour_is_not_added(self):
+        mask = rect_mask(20, 20, 60, 70, (100, 120))
+        mask[20:70, 62:102] = True
+        cleaned = clean_mask(mask, (40, 40))
+        self.assertTrue(cleaned[40, 40])
+        self.assertFalse(cleaned[40, 80])
+
+    def test_prompted_component_does_not_import_distant_neighbour(self):
+        mask = rect_mask(20, 20, 50, 50, (160, 160))
+        mask[80:145, 80:145] = True
+        cleaned = clean_mask(mask, (30, 30))
+        self.assertTrue(cleaned[30, 30])
+        self.assertFalse(cleaned[100, 100])
+
+    def test_exact_prompt_wins_over_larger_nearby_component(self):
+        mask = rect_mask(20, 20, 25, 25, (80, 80))
+        mask[20:45, 27:50] = True
+        cleaned = clean_mask(mask, (23, 23))
+        self.assertTrue(cleaned[23, 23])
+        self.assertFalse(cleaned[30, 30])
+
+    def test_split_handle_retained_but_distant_fragment_removed(self):
+        mask = rect_mask(20, 20, 70, 80, (160, 160))
+        mask[30:65, 72:82] = True
+        mask[30:65, 120:130] = True
+        cleaned = clean_mask(mask, (40, 40))
+        self.assertTrue(cleaned[40, 76])
+        self.assertFalse(cleaned[40, 125])
+
+    def test_handle_hole_and_thin_details_are_preserved(self):
+        mask = rect_mask(20, 20, 80, 80, (100, 100))
+        mask[35:45, 35:45] = False
+        cleaned = clean_mask(mask, (25, 25))
+        self.assertFalse(cleaned[40, 40])
+        cord = rect_mask(20, 20, 22, 80, (100, 100))
+        alpha = feathered_alpha(cord)
+        self.assertGreater(float(alpha[45, 20]), .5)
+        self.assertEqual(float(alpha[45, 19]), 0)
+
+    def test_unrelated_logits_do_not_change_target_stability(self):
+        logits = np.full((100, 100), -4, np.float32)
+        logits[10:30, 10:30] = 4
+        support = rect_mask(8, 8, 32, 32, (100, 100))
+        before = stability_score(logits, support=support)
+        logits[50:90, 50:90] = .5
+        self.assertEqual(stability_score(logits, support=support), before)
+
+    def test_low_confidence_background_is_not_selectable(self):
+        weak = candidate(rect_mask(20, 20, 140, 150), score=.50, stability=.68)
+        self.assertIsNone(rank_candidates([weak]))
+        self.assertFalse(weak.selectable)
+
+    def test_lighting_preparation_keeps_original_pixels_untouched(self):
+        frame = np.full((60, 80, 3), 20, np.uint8)
+        original = frame.copy()
+        enhanced = enhance_low_light(frame)
+        np.testing.assert_array_equal(frame, original)
+        self.assertGreater(float(enhanced.mean()), float(frame.mean()))
+        bright = np.full((60, 80, 3), 140, np.uint8)
+        self.assertIs(enhance_low_light(bright), bright)
+
     def test_two_hand_zone_does_not_expand_first_hand_again(self):
         a, b = make_hand((150, 200)), make_hand((450, 200), palm=100)
         expected = hand_zone((480, 640), [a]) | hand_zone((480, 640), [b])
@@ -208,6 +293,17 @@ class AppControlTests(unittest.TestCase):
         self.assertEqual(self.app.selector.state, "IDLE")
         self.assertIsNone(self.app.pending_lock)
         self.worker.retry.assert_called_once()
+
+    def test_hand_skeleton_is_visible_without_debug(self):
+        self.app.manip.objects.clear()
+        self.worker.poll.return_value = None
+        self.assertFalse(self.app.debug)
+        self.assertFalse(self.app.show_keys)
+        with patch("main.draw_hand_skeleton") as draw:
+            self.app.step(textured(), 1, .04, [{"points": make_hand(), "label": "Right"}])
+            self.assertEqual(draw.call_count, 1)
+            self.app.step(textured(), 1.1, .04, [])
+            self.assertEqual(draw.call_count, 1)  # no invented skeleton after tracking loss
 
     def test_refinement_preserves_current_camera_translation_and_sprite_transform(self):
         app, obj = self.app, self.obj

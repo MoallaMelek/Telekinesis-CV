@@ -19,6 +19,7 @@ import numpy as np
 import onnxruntime as ort
 
 from model_assets import check_cancelled, ensure_asset
+from lighting import enhance_low_light
 
 MODEL_DIR = Path(__file__).with_name("models") / "edgesam"
 REVISION = "e0564124628944e1622973d4e0f68158b46f035a"
@@ -46,7 +47,7 @@ def preprocess(frame):
     height, width = frame.shape[:2]
     scale = 1024 / max(height, width)
     new_h, new_w = int(height * scale + 0.5), int(width * scale + 0.5)
-    rgb = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (new_w, new_h),
+    rgb = cv2.resize(cv2.cvtColor(enhance_low_light(frame), cv2.COLOR_BGR2RGB), (new_w, new_h),
                      interpolation=cv2.INTER_LINEAR).astype(np.float32)
     tensor = np.zeros((1, 3, 1024, 1024), np.float32)
     tensor[0, :, :new_h, :new_w] = ((rgb - PIXEL_MEAN) / PIXEL_STD).transpose(2, 0, 1)
@@ -109,8 +110,11 @@ class MaskResult:
     embedding: Embedding = field(repr=False, default=None)
 
 
-def stability_score(logits, offset=1.0):
+def stability_score(logits, offset=1.0, support=None):
     high, low = logits > offset, logits > -offset
+    if support is not None:
+        high &= support
+        low &= support
     return float(high.sum() / max(low.sum(), 1))
 
 
@@ -124,21 +128,31 @@ def clean_mask(mask, point=None):
     if point is not None:
         x, y = int(round(point[0])), int(round(point[1]))
         h, w = mask.shape
-        window = labels[max(0, y - 6):min(h, y + 7), max(0, x - 6):min(w, x + 7)]
-        ids = window[window > 0]
-        if ids.size:
-            keep = int(np.bincount(ids).argmax())
+        if 0 <= x < w and 0 <= y < h and labels[y, x] > 0:
+            keep = int(labels[y, x])
+        else:
+            y0, x0 = max(0, y - 6), max(0, x - 6)
+            window = labels[y0:min(h, y + 7), x0:min(w, x + 7)]
+            ys, xs = np.nonzero(window)
+            if len(xs):
+                closest = np.argmin((xs + x0 - x) ** 2 + (ys + y0 - y) ** 2)
+                keep = int(window[ys[closest], xs[closest]])
     if keep is None:
         keep = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     main = labels == keep
-    # Also keep sizable pieces (e.g. a mug handle split off by a thin gap).
+    # Keep adjacent fragments such as a split handle, never a distant neighbour.
+    # Measure proximity to the ORIGINAL component so fragments cannot form a chain.
+    area = stats[keep, cv2.CC_STAT_AREA]
+    gap = int(np.clip(max(stats[keep, cv2.CC_STAT_WIDTH], stats[keep, cv2.CC_STAT_HEIGHT]) * .03, 3, 8))
+    nearby = cv2.dilate(main.astype(np.uint8), np.ones((2 * gap + 1, 2 * gap + 1), np.uint8)) > 0
     for i in range(1, count):
-        if i != keep and stats[i, cv2.CC_STAT_AREA] >= .15 * stats[keep, cv2.CC_STAT_AREA]:
+        if (i != keep and .03 * area <= stats[i, cv2.CC_STAT_AREA] <= .50 * area
+                and (nearby & (labels == i)).any()):
             main |= labels == i
-    # Fill interior holes smaller than 2% of the object (specular highlights, labels).
+    # Repair tiny speckles only; preserve genuine holes (handles, loops, gaps).
     inverse = (~main).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(inverse, connectivity=4)
-    limit = .02 * main.sum()
+    limit = min(16, .002 * main.sum())
     for i in range(1, count):
         x, y, w, h, area = stats[i]
         touches_border = x == 0 or y == 0 or x + w == mask.shape[1] or y + h == mask.shape[0]
@@ -161,7 +175,7 @@ def rank_candidates(candidates, max_area=.30):
     def allowed(c):   # hard filters: never the hand, the user's body, or a surface
         return (0 < c.area <= max_area and c.borders <= 1 and c.person_overlap < .6
                 and c.hand_overlap < .5 and math.isfinite(c.score)
-                and math.isfinite(c.stability))
+                and math.isfinite(c.stability) and c.score >= .50 and c.stability >= .70)
 
     for c in candidates:
         c.selectable = allowed(c)
@@ -174,7 +188,8 @@ def rank_candidates(candidates, max_area=.30):
         for c in candidates:
             c.rank_reason = ("too large" if c.area > max_area else "surface (touches borders)"
                              if c.borders > 1 else "your body (person mask)"
-                             if c.person_overlap >= .6 else "covers hand")
+                             if c.person_overlap >= .6 else "covers hand"
+                             if c.hand_overlap >= .5 else "uncertain mask")
         return None
     best = max(candidates[i].score for i in plausible)
     competitive = [i for i in plausible if candidates[i].score >= best - .15]
@@ -187,6 +202,7 @@ def rank_candidates(candidates, max_area=.30):
                          "surface (touches borders)" if c.borders > 1 else
                          "your body (person mask)" if c.person_overlap >= .6 else
                          "covers hand" if c.hand_overlap >= .25 else
+                         "uncertain mask" if not c.selectable else
                          "unstable edges" if c.stability < steady - .08 else
                          "low score" if c.score < best - .15 else "smaller part")
     return choice
@@ -259,7 +275,8 @@ class EdgeSAM:
             overlap = float((mask & embedding.hand_zone).sum() / max(mask.sum(), 1))
             body = (0.0 if embedding.person is None else
                     float((mask & embedding.person).sum() / max(mask.sum(), 1)))
-            candidates.append(Candidate(mask, logits, float(score), stability_score(logits),
+            support = cv2.dilate(mask.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+            candidates.append(Candidate(mask, logits, float(score), stability_score(logits, support=support),
                                         area, overlap, touched_borders(mask), body))
         # Deduplicate near-identical masks so "alternatives" are really different.
         unique = []
@@ -267,6 +284,28 @@ class EdgeSAM:
             if all(iou(c.mask, u.mask) < .92 for u in unique):
                 unique.append(c)
         return unique
+
+    def refine_candidate(self, embedding, coarse, positives, negatives=(), max_area=.30):
+        """One focused decoder pass; accept only a safer, agreeing silhouette.
+
+        Reuse the image encoding. A box focuses boundary decisions, while the original
+        target and hand-negative points retain intent. Never switch to a different object.
+        """
+        ys, xs = np.nonzero(coarse.mask)
+        if not len(xs):
+            return coarse
+        h, w = coarse.mask.shape
+        box = (max(0, int(xs.min()) - 8), max(0, int(ys.min()) - 8),
+               min(w - 1, int(xs.max()) + 8), min(h - 1, int(ys.max()) + 8))
+        focused = self.decode(embedding, positives, negatives, box=box)
+        rank_candidates(focused, max_area)
+        agreeing = [c for c in focused if c.selectable and iou(c.mask, coarse.mask) >= .80
+                    and .85 <= c.mask.sum() / coarse.mask.sum() <= 1.20
+                    and c.stability >= coarse.stability + .005
+                    and c.score >= coarse.score - .10
+                    and c.hand_overlap <= coarse.hand_overlap + .02
+                    and c.person_overlap <= coarse.person_overlap + .02]
+        return max(agreeing, key=lambda c: c.stability) if agreeing else coarse
 
 
 def touched_borders(mask, fraction=.08):
@@ -351,8 +390,19 @@ class SegmentationWorker:
             encoder_ms = 0.0
         decoding = time.perf_counter()
         candidates = self.model.decode(embedding, job.positives, job.negatives, job.box)
-        decoder_ms = (time.perf_counter() - decoding) * 1000
         choice = rank_candidates(candidates, job.max_area) if candidates else None
+        if job.kind == "select" and choice is not None:
+            coarse = candidates[choice]
+            refined = self.model.refine_candidate(embedding, coarse, job.positives, job.negatives, job.max_area)
+            if refined is not coarse:
+                coarse.rank_reason = "initial outline"
+                refined.rank_reason = "chosen: focused boundary check"
+                if iou(coarse.mask, refined.mask) >= .98:
+                    candidates[choice] = refined
+                else:
+                    candidates.append(refined)
+                    choice = len(candidates) - 1
+        decoder_ms = (time.perf_counter() - decoding) * 1000
         point = tuple(job.positives[0]) if job.positives else None
         return job.kind, MaskResult(job.snapshot_id, job.prompt_id, point, candidates, choice,
                                     encoder_ms, decoder_ms,

@@ -56,20 +56,26 @@ def draw_lines(frame, lines, x, y, colour=WHITE, scale=.45, leading=19):
     return y
 
 
-def draw_hud(frame, status, summary, message=None, lost=False, show_keys=True):
+def draw_hud(frame, status, summary, message=None, lost=False, show_keys=False, *, stage=1, hint=None):
     h, w = frame.shape[:2]
     status_lines = wrap_text(status, w - 24, max_lines=2)
-    message_lines = wrap_text(message, w - 24, .38, 2) if message else []
-    top_end = 40 + 19 * len(status_lines) + 16 * len(message_lines)
+    message_lines = wrap_text(message, w - 24, .38, 1 if h < 300 else 2) if message else []
+    top_end = 56 + 19 * len(status_lines) + 16 * len(message_lines)
     panel(frame, 0, top_end)
     cv2.line(frame, (12, 31), (w - 12, 31), (65, 70, 78), 1)
     draw_lines(frame, ["TELEKINESIS CV"], 12, 22, CYAN, .48)
     compact = wrap_text(summary, max(40, w - 210), .34, 1)[0]
     size = cv2.getTextSize(compact, FONT, .34, 1)[0][0]
     draw_lines(frame, [compact], w - size - 12, 21, GREY, .34)
-    y = draw_lines(frame, status_lines, 12, 51)
+    for i, label in enumerate(("1 POINT", "2 PINCH", "3 MOVE"), 1):
+        x = 12 + (i - 1) * ((w - 24) // 3)
+        draw_lines(frame, [label], x, 48, CYAN if i == stage else GREY, .39)
+        if i == stage:
+            cv2.line(frame, (x, 53), (x + min(85, (w - 30) // 3), 53), CYAN, 2)
+    y = draw_lines(frame, status_lines, 12, 71)
     draw_lines(frame, message_lines, 12, y, CYAN, .38, 16)
-    footer = wrap_text(KEYS if show_keys else "K help / Q quit", w - 24, .34, 5)
+    footer = wrap_text(KEYS.replace("K help", "K close help") if show_keys else
+                       hint or "Mouse also works / K help / Q quit", w - 24, .34, 5)
     if lost:
         footer = wrap_text("Tracking lost. Last position held; Esc restores reality.", w - 24, .38, 2) + footer
     available = max(1, (h - top_end - 24) // 16)

@@ -155,14 +155,15 @@ class ObjectTracker:
 def feathered_alpha(mask, radius=2):
     """Binary mask (0/1) -> soft alpha (0..1) with a ~radius px transition at the edge.
 
-    A binary mask produces jagged 'cut-out' edges; a small blur of the mask makes edge
-    pixels partially transparent, which hides aliasing and the 1-2 px halo of background
-    colour that segmentation boundaries always contain. The mask is eroded by 1 px first
-    so the soft edge sits inside the object rather than on the desk.
+    Fade edge pixels inside the silhouette to hide aliasing without adding surrounding
+    background. Unlike erosion, this preserves thin handles and cords.
     """
-    m = cv2.erode(mask.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(np.float32)
-    k = 2 * radius + 1
-    return np.clip(cv2.GaussianBlur(m, (k, k), 0) * 1.15, 0, 1)
+    if radius <= 0:
+        return mask.astype(np.float32)
+    # Fade inside the silhouette. Erosion deleted thin handles and cords entirely;
+    # distance-based alpha keeps them visible without importing background pixels.
+    distance = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3)
+    return np.clip(distance / radius * 1.15, 0, 1)
 
 
 class SceneMemory:

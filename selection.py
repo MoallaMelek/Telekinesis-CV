@@ -148,9 +148,9 @@ class Selector:
     not where the hand was in that snapshot.
     """
 
-    def __init__(self, dwell=.22, radius=16, reuse_seconds=2.5, carousel=1.6):
+    def __init__(self, dwell=.22, radius=16, reuse_seconds=2.5, carousel=None):
         self.dwell, self.radius, self.reuse_seconds = dwell, radius, reuse_seconds
-        self.carousel = carousel       # keep pointing at a preview -> next outline
+        self.carousel = carousel       # opt-in only; normal previews stay steady
         self.preview_since = None
         self.snapshot_id = self.prompt_id = 0
         self.expected_snapshot = None
@@ -235,11 +235,10 @@ class Selector:
             if self.latched[y, x]:
                 self.left_since = None
                 self.anchor = None
-                # Hands-only correction: keep pointing steadily near the prompt and the
-                # preview steps through the other plausible outlines (part/whole).
+                # Optional timed alternatives; normal use requires M/right-click.
                 near = (self.result.point is not None and
                         np.linalg.norm(aim - np.asarray(self.result.point)) <= 2.5 * self.radius)
-                if (near and self.preview_since is not None and len(self.result.candidates) > 1
+                if (self.carousel is not None and near and self.preview_since is not None and len(self.result.candidates) > 1
                         and now - self.preview_since >= self.carousel):
                     self.cycle(now)
                 elif not near:

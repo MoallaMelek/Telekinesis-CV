@@ -31,7 +31,10 @@ All model downloads are bounded and installed atomically. Verified caches work o
 an interrupted or corrupt download is repaired on retry. Telekinesis does not record
 or upload webcam frames. Its network code downloads model assets only; third-party
 MediaPipe builds may emit their own diagnostic network traffic.
-**F** toggles fullscreen; the window is resizable. **K** toggles the compact control guide.
+**F** toggles fullscreen; the window is resizable. The default view shows **POINT → PINCH → MOVE**
+and the next action. **K** opens the full control guide. Hand skeleton lines are always
+visible on detected hands; thumb/index tips are highlighted and the skeleton turns green
+while pinching. The labelled **TARGET** ring shows where object selection is aimed.
 
 To prepare the models before connecting a camera:
 
@@ -62,7 +65,7 @@ extracted images (including duplicates) can exist at once; **Tab** changes the a
 | You do | What happens |
 | --- | --- |
 | **Touch** an object in the image with your index fingertip and hold still ~¼ s | A ring fills, then "Finding the object…"; a thin cyan outline shows the silhouette |
-| Keep pointing at the outline ~1.6 s | It steps to the next plausible outline (part ↔ whole). Pinch when the right one shows |
+| Keep pointing at the outline | It stays steady. Use **M** or right-click for a different plausible outline |
 | **Pinch** (thumb + index) | Locks **and** grabs the object; its original spot is reconstructed |
 | Move the pinched hand | The object follows, keeping your grab offset (no snapping) |
 | Open fingers slowly | Placed: it floats where you left it ("frozen in space") |
@@ -157,6 +160,19 @@ Transforms are explicit: BGR→RGB, SAM normalization, resize longest side to 10
 pad right/bottom; the 256² mask logits are upsampled, **the padding is cropped, then**
 resized back (`restore_logits`). Skipping the crop would stretch every mask.
 
+**Precision and low light.** Mask cleanup first keeps the component directly under the
+target, or the nearest foreground if the target is just outside the edge. It retains
+only nearby fragments (such as a separated handle), removes distant neighbours, and
+preserves genuine holes. Stability is measured around that object rather than across
+unrelated pixels. Low-confidence silhouettes stay unselectable instead of guessing a
+large background region. In dim scenes, gentle luminance contrast and gamma preparation
+help the segmentation model; the live image, extracted sprite colours, and cached scene
+pixels remain original. Bright scenes bypass the adjustment.
+Before showing the default outline, one additional decoder pass uses a box around the
+candidate to check its boundaries. It reuses the same image encoding and keeps the
+initial result unless the new mask passes safety filters, agrees closely in shape and
+size, and has more stable edges. This adds decoder time, not another image encoding.
+
 **Choosing the whole object.** SAM returns several candidates (part / object / bigger).
 Its own quality score favours small crisp parts (a door over the whole truck), so
 `rank_candidates` drops implausible ones (huge, surfaces touching 2+ image borders,
@@ -164,9 +180,10 @@ covering the hand), then prefers the **largest** candidate whose score and *stab
 (does the mask change if the logit threshold moves ±1?) are close to the best. Stability
 is what rejects a merge of two neighbouring objects (their seam is uncertain).
 
-**Binary vs soft masks, alpha compositing.** A binary mask is 0/1 per pixel. We blur it
-slightly (`feathered_alpha`) into a *soft* alpha 0…1 so edges blend instead of looking
-cut out. The extracted sprite is `RGBA = camera pixels + alpha`. Compositing uses
+**Binary vs soft masks, alpha compositing.** A binary mask is 0/1 per pixel. We feather it
+inside its silhouette (`feathered_alpha`) into a *soft* alpha 0…1 so edges blend instead of looking
+cut out, without erasing thin handles or adding background pixels. The extracted sprite
+is `RGBA = camera pixels + alpha`. Compositing uses
 premultiplied colour: `out = src·α + dst·(1−α)`; premultiplying before warping avoids
 dark fringes (`manipulation.render_sprite`).
 
@@ -210,7 +227,9 @@ an object is held. Person segmentation runs only when objects exist.
 ## Honest limitations
 
 - Segmentation quality varies with contrast, clutter, thin/transparent/reflective objects
-  and lighting. When the default outline is wrong, keep pointing (carousel) or press M.
+  and lighting. When the default outline is wrong, press M or move the TARGET ring.
+  Lighting preparation cannot recover detail hidden in near-black pixels, remove sensor
+  noise perfectly, or guarantee separation of an object from a strong cast shadow.
 - Pinch/aim use 2D landmarks; bad lighting or motion blur still causes misses.
 - Reconstruction without a clean plate or memory is a guess (blurred). Shadows cast by the
   real object are outside the mask and stay visible. Big camera moves break alignment;
@@ -265,7 +284,7 @@ on Windows and Linux plus the real-model interaction suite on Windows. Downloads
 explicitly before integration tests; a missing model is a CI failure, not a passing skip.
 
 `hud.py` owns width-aware camera feedback, `model_assets.py` owns download integrity,
-and `test_reliability.py` covers model recovery, corrupt downloads, rejected candidates,
+`lighting.py` owns inference-only dim-scene preparation, and `test_reliability.py` covers model recovery, corrupt downloads, rejected candidates,
 mouse controls, cancellation, delayed refinement and HUD sizing. Historical experiment
 records remain in `.ai/`; archived sources are not part of the active application.
 

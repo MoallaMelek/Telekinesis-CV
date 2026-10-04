@@ -27,3 +27,15 @@
   slower hosted inference does not expire valid results.
 - No browser/cloud deployment: this remains a local desktop application. No license
   assigned to owner-authored source; commercial model use remains an owner decision.
+
+2026-10-04 (Codex desktop) — Human targeting/lighting follow-up:
+- Show anatomical hand skeletons in ordinary use; guide point, pinch, move contextually.
+- Keep previews steady; explicit M/right-click alternatives prevent unexpected changes.
+- Own masks by the target component; constrain fragments, preserve real holes/thin handles,
+  and reject weak masks instead of locking broad guesses.
+- Enhance dim inference frames only; original camera/object appearance is unchanged.
+- Reuse encoded features for a focused decoder pass; require agreement, bounded size,
+  confidence and hand/body overlap, plus increased stability. Keep coarse alternatives.
+- Retain model and architecture. Synthetic dark/noisy bottle overlap rose .887 to .958
+  with lighting preparation; shadowed bottle .959 to .992 with focused decoding. These
+  examples do not establish general-world accuracy.
