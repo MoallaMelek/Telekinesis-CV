@@ -8,14 +8,14 @@ different object, so it can lose confidence but cannot silently switch targets.
 """
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-import hashlib
 from pathlib import Path
 import time
-from urllib.request import urlopen
 
 import cv2
 import mediapipe as mp
 import numpy as np
+
+from model_assets import ensure_asset
 
 PERSON_MODEL = Path(__file__).with_name("models") / "mediapipe" / "selfie_segmenter.tflite"
 PERSON_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
@@ -24,19 +24,7 @@ PERSON_SHA256 = "191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658
 
 
 def ensure_person_model():
-    if PERSON_MODEL.is_file() and hashlib.sha256(PERSON_MODEL.read_bytes()).hexdigest() == PERSON_SHA256:
-        return
-    PERSON_MODEL.parent.mkdir(parents=True, exist_ok=True)
-    temporary = PERSON_MODEL.with_suffix(".download")
-    try:
-        print("Downloading MediaPipe selfie segmenter (250 KB)...", flush=True)
-        with urlopen(PERSON_URL, timeout=10) as response:
-            temporary.write_bytes(response.read())
-        if hashlib.sha256(temporary.read_bytes()).hexdigest() != PERSON_SHA256:
-            raise RuntimeError("Person segmentation model checksum failed")
-        temporary.replace(PERSON_MODEL)
-    finally:
-        temporary.unlink(missing_ok=True)
+    ensure_asset(PERSON_MODEL, PERSON_URL, PERSON_SHA256, max_bytes=2 * 1024 * 1024)
 
 
 class PersonSegmenter:

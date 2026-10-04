@@ -2,17 +2,19 @@
 
 import math
 from pathlib import Path
-from urllib.request import urlopen
 
 import cv2
 import mediapipe as mp
 import numpy as np
+
+from model_assets import ensure_asset
 
 MODEL_PATH = Path(__file__).with_name("hand_landmarker.task")
 MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
     "hand_landmarker/float16/1/hand_landmarker.task"
 )
+MODEL_SHA256 = "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"
 
 # Each pair is an anatomical connection between two of the 21 landmark IDs.
 CONNECTIONS = (
@@ -32,17 +34,7 @@ HIGHLIGHTS = {
 
 
 def ensure_model():
-    if MODEL_PATH.is_file():
-        return
-    print("Downloading Google's hand landmark model once (about 8 MB)...", flush=True)
-    # Save atomically so an interrupted download never looks like a valid model.
-    temporary = MODEL_PATH.with_suffix(".download")
-    try:
-        with urlopen(MODEL_URL, timeout=30) as response:
-            temporary.write_bytes(response.read())
-        temporary.replace(MODEL_PATH)
-    finally:
-        temporary.unlink(missing_ok=True)
+    ensure_asset(MODEL_PATH, MODEL_URL, MODEL_SHA256, max_bytes=16 * 1024 * 1024)
 
 
 class HandTracker:

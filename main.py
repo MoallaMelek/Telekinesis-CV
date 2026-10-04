@@ -19,6 +19,7 @@ from scene import (ObjectTracker, PersonSegmenter, Reconstruction, SceneMemory, 
                    feathered_alpha, make_inpainter)
 from segmentation import MODEL_DIR, Job, SegmentationWorker, iou
 from selection import Selector, hand_zone, negative_prompts
+from hud import draw_hud
 
 WINDOW = "Telekinesis CV | Reality Manipulation"
 CYAN, GREEN, ORANGE, WHITE, GREY = (255, 220, 90), (120, 255, 140), (60, 170, 255), (235, 235, 235), (160, 160, 160)
@@ -40,6 +41,8 @@ def shifted(mask, offset):
         return mask
     out = np.zeros_like(mask)
     h, w = mask.shape
+    if abs(dx) >= w or abs(dy) >= h:
+        return out
     out[max(0, dy):h + min(0, dy), max(0, dx):w + min(0, dx)] = \
         mask[max(0, -dy):h - max(0, dy), max(0, -dx):w - max(0, dx)]
     return out
@@ -146,7 +149,7 @@ class App:
         hovering = None if aim is None else self.manip.hit(aim)
         negatives = [p for pts in hand_points for p in negative_prompts(pts)]
         job = None
-        if self.worker.ready or self.worker.model is not None:
+        if not self.worker.error and (self.worker.ready or self.worker.model is not None):
             job = self.selector.update(now, None if hovering else aim, frame, hand_points,
                                        zone, self.blocked, engaged, negatives=negatives)
         if job is not None:
@@ -183,7 +186,7 @@ class App:
         if self.pending_lock is not None:
             slot, deadline = self.pending_lock
             hand = hands[slot]
-            if not hand.pinch.pinched or now > deadline:
+            if not hand.pinch.pinched or now > deadline or self.worker.error:
                 self.pending_lock = None
                 self.say("Pinch cancelled - no outline was ready. Hold still, then pinch.", now)
             elif self.selector.candidate is not None:
@@ -196,7 +199,7 @@ class App:
             occluder = (person > .5) | zone
             for group in self.groups():
                 group.tracker.update(frame, occluder, now)
-            self.schedule_refine(frame, zone, (person > .5) & zone, now)
+            self.schedule_refine(frame, zone, now)
         self.manip.update_objects(now, dt)
         person = self.person() if self.manip.objects or self.debug else None
 
@@ -268,6 +271,12 @@ class App:
     # ------------------------------------------------------------------ lock / extract
     def lock(self, slot, now):
         result, candidate = self.selector.result, self.selector.candidate
+        if candidate is None or not candidate.selectable:
+            return
+        if len(self.manip.objects) >= self.manip.max_objects:
+            self.say("Object limit reached - Esc releases one, X releases all", now)
+            self.selector.clear()
+            return
         embedding = result.embedding
         snap = embedding.frame
         mask = candidate.mask.copy()
@@ -304,14 +313,14 @@ class App:
         reconstruction = Reconstruction(frame, mask, self.memory, now, self.inpainter)
         return Group(gid, mask, centroid, tracker, reconstruction), sprite
 
-    def schedule_refine(self, frame, zone, hand_pixels, now):
+    def schedule_refine(self, frame, zone, now):
         """Re-segment once the hand has left the original region: a hand-free view
         gives a complete silhouette (no finger notch) and clean pixels."""
         if self.refining is not None:
             if now - self.refining[2] > 6:
                 self.refining = None           # replaced/lost in the one-slot queue
             return
-        if self.worker.busy or self.selector.state == "ANALYZING":
+        if self.worker.error or not self.worker.ready or self.worker.busy or self.selector.state == "ANALYZING":
             return
         for group in self.groups():
             if group.refined:
@@ -326,12 +335,15 @@ class App:
                 group.clear_since = now
             if now - group.clear_since < .4:
                 continue
-            x0, y0, x1, y1 = bbox_of(shifted(group.mask, group.tracker.offset), margin=6)
+            box = bbox_of(shifted(group.mask, group.tracker.offset), margin=6)
+            if box is None:
+                continue
+            x0, y0, x1, y1 = box
             self.refine_counter += 1
             job = Job("refine", self.refine_counter, self.refine_counter, frame=frame,
                       positives=(tuple(group.origin + group.tracker.offset),), box=(x0, y0, x1, y1),
-                      hand_points=(), hand_zone=zone, captured_at=now, max_area=1.0)
-            self.snapshots[self.refine_counter] = hand_pixels.copy()
+                      hand_points=(), hand_zone=zone, person=self.person() > .5,
+                      captured_at=now, max_area=self.args.max_area)
             self.refining = (group.id, self.refine_counter, now, group.tracker.offset.copy())
             group.refine = "re-segmenting from a hand-free view..."
             self.worker.request(job)
@@ -356,6 +368,8 @@ class App:
         old = shifted(group.mask, submit_offset)
         best, best_iou = None, 0.0
         for c in result.candidates:
+            if not c.selectable:
+                continue
             value = iou(c.mask, old)
             if value > best_iou:
                 best, best_iou = c, value
@@ -366,16 +380,20 @@ class App:
             self.counters["refine_rejected"] += 1
             return
         mask = best.mask
-        hand_pixels = self.snapshots.pop(result.snapshot_id, None)
-        if hand_pixels is not None:
-            mask = mask & ~hand_pixels
         new_group, sprite = self.extract(result.embedding.frame, mask, now, group.id)
+        # The result describes the SUBMITTED frame, not the current camera pose.
+        new_group.tracker.offset = group.tracker.offset - submit_offset
+        delta = new_group.origin - (group.origin + submit_offset)
         group.mask, group.origin = new_group.mask, new_group.origin
         group.tracker, group.reconstruction = new_group.tracker, new_group.reconstruction
         group.refine = f"refined from hand-free view (IoU {best_iou:.2f})"
         for obj in self.manip.objects:
             if obj.group is group:
+                # Preserve the image transform when refinement changes the centroid.
+                obj.position += obj.matrix()[:, :2] @ delta
                 obj.sprite = sprite
+                self.manip.two.pop(obj.id, None)
+                self.manip._rebase(obj)
         self.counters["refine_accepted"] += 1
         print(f"[{now:7.2f}s] refinement accepted, IoU {best_iou:.2f}, "
               f"background: {group.reconstruction.source}", flush=True)
@@ -384,9 +402,13 @@ class App:
     def key(self, key, now):
         obj = self.active()
         m = self.manip
-        if key == 27 and obj is not None:                       # Esc
-            m.remove(obj)
-            self.say("Released back to reality (original shown again)", now)
+        if key == 27:                                          # Esc
+            self.cancel_selection()
+            if obj is not None:
+                m.remove(obj)
+                self.say("Released back to reality (original shown again)", now)
+            else:
+                self.say("Selection cancelled", now)
         elif key in (ord("r"), ord("R")) and obj is not None:
             m.reset(obj)
             self.say("Reset", now)
@@ -420,12 +442,20 @@ class App:
             ids = [o.id for o in m.objects]
             m.active = ids[(ids.index(m.active) + 1) % len(ids)] if m.active in ids else ids[0]
         elif key in (ord("x"), ord("X")):
+            self.cancel_selection()
             for o in list(m.objects):
                 m.remove(o)
             self.say("All objects released", now)
         elif key in (ord("e"), ord("E")) and self.worker.error:
+            self.cancel_selection()
+            self.refining = None
             self.worker.retry()
             self.say("Retrying segmentation", now)
+
+    def cancel_selection(self):
+        self.selector.clear()
+        self.pending_lock = None
+        self.worker.discard_pending()
 
     def on_mouse(self, event, x, y, flags, _param=None):
         now = time.perf_counter() - (self.started_wall or 0)
@@ -440,7 +470,13 @@ class App:
             self.selector.cycle(now)
         elif event == cv2.EVENT_MOUSEWHEEL and self.active() is not None:
             obj = self.active()
-            up = cv2.getMouseWheelDelta(flags) > 0
+            # HighGUI packs a signed 16-bit wheel delta into the upper flags word.
+            # getMouseWheelDelta is a C++ helper absent from Python OpenCV bindings.
+            delta = (flags >> 16) & 0xFFFF
+            delta = delta - 0x10000 if delta & 0x8000 else delta
+            if delta == 0:
+                return
+            up = delta > 0
             if flags & cv2.EVENT_FLAG_CTRLKEY:
                 obj.angle += 10 if up else -10
             else:
@@ -448,6 +484,8 @@ class App:
                                           self.manip.min_scale, self.manip.max_scale))
             if obj.mode == "home":
                 obj.mode = "floating"
+            self.manip.two.pop(obj.id, None)
+            self.manip._rebase(obj)
 
     started_wall = None
     last_frame = last_zone = None
@@ -500,29 +538,23 @@ class App:
                     c = ipt(hand.palm_center)
                     cv2.ellipse(out, c, (26, 26), -90, 0, 360 * p, colour, 3, cv2.LINE_AA)
                     text(out, label, (c[0] - 28, c[1] + 42), colour, .4)
-        # Status: one line of "what to do next", plus short-lived event messages.
-        text(out, self.status(now), (10, 22), WHITE, .5)
-        y = 44
-        for message, until in list(self.messages):
-            if now < until:
-                text(out, message, (10, y), CYAN, .45)
-                y += 20
         hidden = sum(1 for o in m.objects if not o.visible)
         lost = [g for g in self.groups() if g.tracker.state.startswith("LOST")]
+        message = self.messages[-1][0] if self.messages and now < self.messages[-1][1] else None
+        summary = f"{len(m.objects)} objects"
+        if m.active is not None:
+            summary += f" / active {m.active}"
         if hidden:
-            text(out, f"{hidden} hidden (H / fist to show)", (w_right(out, 210), 22), GREY, .42)
-        if lost:
-            text(out, "tracking lost: original held at last position", (10, out.shape[0] - 48), ORANGE, .42)
-        if self.show_keys and not self.debug:
-            text(out, "Esc release  R reset  H hide  C duplicate  Z freeze  M other outline  B background  "
-                      "P clean plate  O occlusion  D debug  K keys  Q quit", (10, out.shape[0] - 10), GREY, .34)
+            summary += f" / {hidden} hidden"
+        self.hud_bottom = draw_hud(out, self.status(now), summary, message,
+                                  bool(lost), self.show_keys and not self.debug)
         if self.debug:
             self.draw_debug(out, now, aim, person, zone)
 
     def status(self, now):
         s, m = self.selector, self.manip
         if self.worker.error:
-            return "Segmentation unavailable - see console (E retries). Hand tracking still runs."
+            return "Model unavailable. Press E to retry; details are in the console."
         if not self.worker.ready and self.worker.model is None:
             return "Loading the segmentation model..."
         held = [o for o in m.objects if o.holders]
@@ -540,10 +572,13 @@ class App:
             return "Hold still on the object..."
         if s.state == "NO_OBJECT":
             return "No clear object there - try touching its centre"
-        if not any(h.present for h in m.hands[:2]) and self.pointer_slot != 2:
-            return "Raise a hand and touch a real object in the image with your fingertip"
         if m.objects:
-            return "Pinch an object to grab - fist 0.6s: hide/show - open palm 1.5s: reset"
+            obj = self.active()
+            if obj is not None and not obj.visible:
+                return "Active object hidden. H shows it; Tab chooses another object."
+            return "Pinch or drag an image to grab it. H hides; R resets; Esc restores reality."
+        if not any(h.present for h in m.hands[:2]) and self.pointer_slot != 2:
+            return "Raise a hand or use the mouse to touch an object's image"
         return "Touch a real object in the image with your fingertip"
 
     def draw_debug(self, out, now, aim, person, zone):
@@ -572,8 +607,10 @@ class App:
                          f"v=({obj.velocity[0]:.0f},{obj.velocity[1]:.0f}) vis {obj.visible}")
             lines.append(f"   track {g.tracker.state} ncc {g.tracker.score:.2f} occl {g.tracker.occluded_fraction:.2f} "
                          f"off {ipt(g.tracker.offset)} | bg: {g.reconstruction.source} | {g.refine}")
-        y = 112                        # below the status line and event messages
+        y = self.hud_bottom + 16
         for line in lines:
+            if y >= out.shape[0] - 132:
+                break
             text(out, line, (10, y), (200, 255, 200), .36)
             y += 15
         for slot, hand in enumerate(m.hands[:2]):
@@ -614,10 +651,6 @@ class App:
 
     def close(self):
         self.inpainter.shutdown(wait=False, cancel_futures=True)
-
-
-def w_right(frame, width):
-    return frame.shape[1] - width
 
 
 # ---------------------------------------------------------------------- camera loop
@@ -690,6 +723,8 @@ def run(args):
         app.started_wall = started
         next_report = 5.0
         while True:
+            if frame.shape[:2] != (height, width):
+                raise RuntimeError("Webcam resolution changed during the session. Restart to realign the scene.")
             captured = time.perf_counter()
             dt, now = captured - previous, captured - started
             previous = captured
@@ -801,6 +836,8 @@ def parse_args(argv=None):
         parser.error("--max-area must be in (0, 1].")
     if args.seconds < 0 or (args.headless and args.seconds <= 0):
         parser.error("Headless runs require a positive --seconds duration.")
+    if args.camera < 0:
+        parser.error("--camera must be a non-negative device index.")
     return args
 
 

@@ -237,6 +237,8 @@ def wrap_degrees(angle):
 class Manipulator:
     """Hand slots -> gesture events, and held-object transforms (1 or 2 hands)."""
 
+    max_objects = 6
+
     def __init__(self, width, height, pinch=.30, release=.45, min_scale=.25, max_scale=4.0,
                  throw_speed=380.0, roll_rotation=True, roll_deadzone=20.0, grace=.25):
         self.width, self.height = width, height
@@ -475,8 +477,8 @@ class Manipulator:
         obj.mode = "home"
         obj.position = obj.home_position()
 
-    def duplicate(self, obj, limit=6):
-        if len(self.objects) >= limit:
+    def duplicate(self, obj):
+        if len(self.objects) >= self.max_objects:
             return None
         copy = ManipulatedObject(self.next_id, obj.group, obj.sprite, duplicate=True,
                                  position=obj.position + (28, 22), scale=obj.scale,

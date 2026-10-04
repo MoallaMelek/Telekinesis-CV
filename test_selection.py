@@ -235,9 +235,9 @@ class WorkerTests(unittest.TestCase):
             check_cancelled(worker.cancel)
 
     def test_missing_model_reports_error_without_crashing(self):
-        import segmentation
-        original = segmentation.urlopen
-        segmentation.urlopen = Mock(side_effect=OSError("offline"))
+        import model_assets
+        original = model_assets.urlopen
+        model_assets.urlopen = Mock(side_effect=OSError("offline"))
         import tempfile
         try:
             with tempfile.TemporaryDirectory() as empty:
@@ -249,7 +249,7 @@ class WorkerTests(unittest.TestCase):
                     time.sleep(.01)
                 worker.close()
         finally:
-            segmentation.urlopen = original
+            model_assets.urlopen = original
         self.assertIn("could not be downloaded", worker.error)
 
 

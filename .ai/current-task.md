@@ -1,4 +1,9 @@
-2026-09-27 — Integrated Reality Manipulation (all 14 phases), driven by the human through Claude Code.
-Writer/orchestrator: Claude Code (this session). Consultant: Codex CLI — unavailable (usage limit until 23:27); no Codex review of this work yet.
-Status: implemented and tested with fixtures + headless/GUI webcam smoke runs. Physical interaction with real hands/objects NOT yet verified by a person.
-Previous Phase-3 files archived in .ai/archive/phase3-slimsam/.
+2026-10-04 — Product and reliability polish, requested by the human in Codex desktop.
+Writer/orchestrator and verifier: Codex desktop. Consultant: fresh read-only Codex CLI session.
+Working in an isolated clone; original checkout left unchanged. Remote main verified at a604556.
+Status: improvements verified locally; 77 tests passed with real EdgeSAM and no skips.
+Read-only review approved. Dependency, syntax and diff checks passed; webcam and GUI
+smoke runs succeeded. Physical gesture feel remains a human verification step.
+Repository commit/push and hosted CI verification follow local checks.
+Consultation: .ai/handoffs/polish-plan.md. No webcam recording or upload.
+Historical Phase-3 sources remain archived in .ai/archive/phase3-slimsam/.

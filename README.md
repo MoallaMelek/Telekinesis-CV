@@ -6,6 +6,15 @@ rotate, hide, restore, reset, duplicate. The physical object never moves; only i
 appearance in the video does, and its original spot is painted over with reconstructed
 background. No object classes, no synthetic assets. Compact local Python + OpenCV.
 
+Built to explore a practical computer-vision illusion: turn something already on your
+desk into an interactive image, without a GPU, cloud inference, or a predefined object
+catalogue. The core workflow is **touch → preview → pinch → manipulate → restore**.
+
+![Synthetic desk demonstration of selection, movement, two-hand transforms and reset](docs/preview.jpg)
+
+*The preview uses the real EdgeSAM model and application pipeline on a synthetic desk
+with drawn hands. It is a reproducible illustration, not a recording of webcam performance.*
+
 ## Start
 
 Windows, Python 3.13 (tested on an i7-1355U, Iris Xe, no CUDA):
@@ -16,10 +25,37 @@ python -m venv .venv
 .\START.cmd              # or: .\run.ps1 --debug
 ```
 
-First launch downloads three revision-pinned, SHA-256-checked models (~46 MB total):
-EdgeSAM encoder + decoder (segmentation) and MediaPipe's selfie segmenter (person mask).
-The hand landmark model is downloaded as before. Webcam frames never leave the machine;
-nothing is recorded. **F** toggles fullscreen; the window is resizable.
+First launch downloads four version-pinned, SHA-256-checked models (~46 MB total):
+EdgeSAM encoder + decoder, MediaPipe's hand landmarker, and its selfie segmenter.
+All model downloads are bounded and installed atomically. Verified caches work offline;
+an interrupted or corrupt download is repaired on retry. Telekinesis does not record
+or upload webcam frames. Its network code downloads model assets only; third-party
+MediaPipe builds may emit their own diagnostic network traffic.
+**F** toggles fullscreen; the window is resizable. **K** toggles the compact control guide.
+
+To prepare the models before connecting a camera:
+
+```powershell
+.\.venv\Scripts\python.exe tools\prepare_models.py
+```
+
+No accounts, API keys, backend service, or deployment are needed. On other platforms,
+use Python 3.13, create the same environment, install `requirements.txt`, and run
+`python main.py` from that environment. Windows is the primary interactive target;
+Linux is covered by offline CI, not a claim of verified live-camera support.
+
+### First successful interaction
+
+1. Keep the camera fixed and place a distinct, opaque object on a contrasting surface.
+2. Wait for model loading to finish. Raise an open hand, then touch the object's image
+   with your index fingertip and hold steady until the cyan outline appears.
+3. Pinch when the outline is right, move your hand, pause, and open your fingers to place it.
+4. Use **R** to reset or **Esc** to restore the physical object's unmodified appearance.
+
+For a reliable first try, hover and drag with the mouse. It drives the same selection
+and manipulation pipeline and helps isolate a hand-tracking problem. The active object
+number, hidden count, and current action are shown above the camera view. Up to six
+extracted images (including duplicates) can exist at once; **Tab** changes the active one.
 
 ## How to use it (gestures)
 
@@ -52,12 +88,51 @@ Ctrl+wheel = rotate. Use it to tell segmentation failures apart from hand-tracki
 | P | Capture a **clean plate** (only valid if you physically removed the objects) |
 | O | Occlusion in front of objects: hands → whole person → off |
 | D | Debug overlay · K key legend · F fullscreen · E retry model after an error · Q quit |
+| T | Toggle one-hand twist rotation |
 
 Options: `--debug`, `--camera 1`, `--backend msmf`, `--hands auto|1|2`,
 `--min-scale/--max-scale`, `--max-area 0.30`, `--threads 4`, `--no-person`,
 `--headless --seconds 20` (metrics only).
 
+Esc also cancels an in-progress selection or early pinch, so a late model result cannot
+grab an object after cancellation. Only candidates passing the size, border, body, and
+hand safety filters can be cycled into a selectable outline.
+
+### Troubleshooting
+
+| Symptom | What to try |
+| --- | --- |
+| Camera cannot open | Close other camera apps, check the shutter and camera permissions, then try `--camera 1` or `--backend msmf`. |
+| Model unavailable | Read the console error, reconnect for downloads if necessary, then press **E**. Retry reloads the model without requiring a new aim. |
+| No outline / wrong outline | Aim near the object's centre; improve contrast; keep your hand clear of the object. Use **M** to cycle safe alternatives. |
+| Gestures feel unreliable | Start with open fingers so pinch can arm; try mouse controls to check segmentation separately. |
+| Slow interaction | Keep `--hands auto`, try `--no-person` or fewer `--threads`; **D** shows stage timings. Two hands and refinement cost more CPU. |
+| Tracking lost after a camera move | The last pose is deliberately held. Use **Esc** or **X**, steady the camera, and select again. |
+| Blurred region behind a moved object | Inpainting is a guess. Capture **P** with objects physically removed **before selecting** for a clean background plate. |
+| FSR is not available | Install `opencv-contrib-python` from the pinned requirements; avoid mixing multiple OpenCV packages in one environment. Smooth fill remains usable if FSR fails. |
+
 ## What happens under the hood (and where)
+
+The stack is **Python 3.13 · OpenCV contrib · NumPy · MediaPipe Tasks · ONNX Runtime CPU**.
+Dependencies are pinned in `requirements.txt`. There is no web frontend or backend.
+
+```mermaid
+flowchart LR
+    Camera[Webcam] --> Mirror[Mirror once]
+    Mirror --> Hands[Hand landmarks]
+    Hands --> Gestures[Temporal gestures and aim]
+    Mirror --> Select[Snapshot selection]
+    Gestures --> Select
+    Select --> Worker[EdgeSAM background worker]
+    Worker --> Preview[Safe outline preview]
+    Preview --> Objects[Extracted sprites and transforms]
+    Mirror --> Scene[Physical tracking and reconstruction]
+    Scene --> Composite[Composite live view]
+    Objects --> Composite
+    Mirror --> Person[Person and hand occlusion]
+    Person --> Composite
+    Composite --> HUD[Status and controls]
+```
 
 **Coordinates.** Every frame is mirrored once (`main.run`), before hand tracking,
 segmentation and drawing, so landmarks, prompts, masks and display share one pixel
@@ -166,3 +241,44 @@ phone, bottle) with a drawn hand whose landmarks drive the app: selection with t
 frame, stale-result rejection, grab offset, reconstruction, hide/show, reset, duplicate,
 release, throw/landing, hand loss, two-hand scale/rotation, camera shift and scene change.
 These prove the pipeline mechanics, **not** how it feels with your real hands and objects.
+
+### Reproducible checks
+
+Fast offline tests do not need model files or a camera:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest test_core test_selection test_reliability
+.\.venv\Scripts\python.exe -m pip check
+```
+
+To run the full interaction suite instead of silently skipping missing-model tests:
+
+```powershell
+.\.venv\Scripts\python.exe tools\prepare_models.py --segmentation-only
+.\.venv\Scripts\python.exe -m unittest discover -v
+.\.venv\Scripts\python.exe tools\fixture_demo.py .cache\fixture-demo.jpg
+```
+
+The fixture demo has a time limit, reports model failures, and closes workers on failure.
+Its exported images contain synthetic fixtures only. GitHub Actions runs offline checks
+on Windows and Linux plus the real-model interaction suite on Windows. Downloads happen
+explicitly before integration tests; a missing model is a CI failure, not a passing skip.
+
+`hud.py` owns width-aware camera feedback, `model_assets.py` owns download integrity,
+and `test_reliability.py` covers model recovery, corrupt downloads, rejected candidates,
+mouse controls, cancellation, delayed refinement and HUD sizing. Historical experiment
+records remain in `.ai/`; archived sources are not part of the active application.
+
+## Models and attribution
+
+- [EdgeSAM](https://github.com/chongzhou96/EdgeSAM) provides promptable segmentation;
+  the [ONNX assets](https://huggingface.co/chongzhou/EdgeSAM) are pinned to a repository
+  revision. EdgeSAM uses the [S-Lab License 1.0](https://github.com/chongzhou96/EdgeSAM/blob/master/LICENSE),
+  which permits non-commercial use and requires separate permission for commercial use.
+- [MediaPipe](https://github.com/google-ai-edge/mediapipe) supplies hand landmarks and
+  selfie segmentation. Model URLs and hashes are explicit in the source.
+- The optional evaluation sheet uses the original [SAM demo photographs](https://github.com/facebookresearch/segment-anything/tree/main/notebooks/images).
+
+Model files are downloaded locally and excluded from Git. This repository does not
+currently declare a separate license for its own source; choosing one remains an owner
+decision. Do not assume a blanket permissive license covers the third-party models.

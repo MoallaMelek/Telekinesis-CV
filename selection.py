@@ -122,13 +122,15 @@ def hand_zone(shape, hands, extra=0):
         if points is None or not np.isfinite(points).all():
             continue
         palm = np.linalg.norm(points[0] - points[9])
+        one = np.zeros(shape[:2], np.uint8)
         hull = cv2.convexHull(np.rint(points).astype(np.int32))
-        cv2.fillConvexPoly(zone, hull, 255)
+        cv2.fillConvexPoly(one, hull, 255)
         size = int(np.clip(palm * .35 + extra, 9, 80)) | 1
-        zone = np.maximum(zone, cv2.dilate(zone, np.ones((size, size), np.uint8)))
+        one = cv2.dilate(one, np.ones((size, size), np.uint8))
         wrist, direction = points[0], points[0] - points[9]
-        cv2.line(zone, tuple(np.rint(wrist).astype(int)),
+        cv2.line(one, tuple(np.rint(wrist).astype(int)),
                  tuple(np.rint(wrist + direction * 3).astype(int)), 255, max(15, int(palm * .8)))
+        zone = np.maximum(zone, one)
     return zone.astype(bool)
 
 
@@ -151,6 +153,7 @@ class Selector:
         self.carousel = carousel       # keep pointing at a preview -> next outline
         self.preview_since = None
         self.snapshot_id = self.prompt_id = 0
+        self.expected_snapshot = None
         self.embedding = None
         self.result = None
         self.choice = None
@@ -181,6 +184,7 @@ class Selector:
         self.anchor = self.anchor_since = self.left_since = None
         self.sent = False
         self.state = state
+        self.expected_snapshot = None
         self.version += 1
 
     def reset_dwell(self, now):
@@ -190,9 +194,11 @@ class Selector:
 
     def cycle(self, now=None):
         """Show the next alternative outline (ordered by size, wrapping around)."""
-        if self.result and len(self.result.candidates) > 1:
-            order = sorted(range(len(self.result.candidates)),
+        if self.result:
+            order = sorted((i for i, c in enumerate(self.result.candidates) if c.selectable),
                            key=lambda i: self.result.candidates[i].area)
+            if not order or self.choice is None:
+                return
             position = order.index(self.choice) if self.choice in order else -1
             self.choice = order[(position + 1) % len(order)]
             self._latch()
@@ -272,6 +278,7 @@ class Selector:
             job.snapshot_id = self.snapshot_id
             job.frame, job.hand_points, job.hand_zone = frame, tuple(hands), zone
             job.captured_at = now
+        self.expected_snapshot = job.snapshot_id
         return job
 
     def _can_reuse(self, now, aim, frame, zone):
@@ -292,7 +299,8 @@ class Selector:
 
     def accept(self, result, now=None):
         """Accept a finished job only if it answers the CURRENT prompt."""
-        if result.prompt_id != self.prompt_id or self.state != "ANALYZING":
+        if (result.prompt_id != self.prompt_id or result.snapshot_id != self.expected_snapshot
+                or self.state != "ANALYZING"):
             return False
         if now is not None and self.submitted_at is not None:
             self.latency_ms = (now - self.submitted_at) * 1000

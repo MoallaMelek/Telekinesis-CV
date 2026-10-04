@@ -30,8 +30,15 @@ def load(name):
     path = FIXTURES / name
     if not path.is_file():
         FIXTURES.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(urlopen(BASE + name, timeout=20).read())
-    return cv2.resize(cv2.imread(str(path)), (640, 480))
+        with urlopen(BASE + name, timeout=20) as response:
+            data = response.read(16 * 1024 * 1024 + 1)
+        if len(data) > 16 * 1024 * 1024 or cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
+            raise RuntimeError(f"Invalid fixture download: {name}")
+        path.write_bytes(data)
+    image = cv2.imread(str(path))
+    if image is None:
+        raise RuntimeError(f"Unreadable fixture: {name}; remove it and retry")
+    return cv2.resize(image, (640, 480))
 
 
 def main(out_path):
@@ -58,7 +65,9 @@ def main(out_path):
         head = np.zeros((240, 160, 3), np.uint8)
         cv2.putText(head, meaning, (5, 120), 0, .5, (255, 255, 255), 1)
         rows.append(np.hstack([head] + tiles[:4]))
-    cv2.imwrite(out_path, np.vstack(rows))
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(out_path, np.vstack(rows)):
+        raise OSError(f"Could not save evaluation: {out_path}")
     print("wrote", out_path)
 
 

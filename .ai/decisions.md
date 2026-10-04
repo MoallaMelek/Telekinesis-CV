@@ -9,3 +9,21 @@
 - Held objects follow the palm centre; throw velocity from samples before release; 0.25 s dropout grace.
 - Adaptive hand count (1 while pointing, 2 while holding): MediaPipe palm detection runs every frame when fewer hands than num_hands are visible.
 - Removed interaction.py/physics.py (crystal era, preserved in git history f0ce5e8).
+
+2026-10-04 (Codex desktop) — Reliability and product polish:
+- Preserve EdgeSAM CPU inference, adaptive hand tracking, screen-space physics,
+  translation-only physical tracking, and clean-plate/memory/inpainting reconstruction.
+- Repair Python wheel input and rebase held transforms; hard-filter rejected outlines
+  in both cycling and refinement; bound extracted objects consistently at six.
+- Keep snapshot + prompt identity explicit. Esc/X cancel pending intent; E reloads failed
+  models and clears stale selection. Model failures surface in the console and HUD.
+- Unify four checksum-verified assets with atomic unique temporary files, size limits,
+  socket/total timeouts and cancellation; add camera-free model preparation.
+- Correct late-refinement translation and centroid changes without moving sprite pixels;
+  merge two hand regions independently instead of dilating the first hand twice.
+- Add compact width-aware HUD, active/hidden object feedback, synthetic preview, setup
+  and troubleshooting guidance, model attribution, and explicit source-license status.
+- Add offline and real-model CI. Pace asynchronous integration waits to wall time so
+  slower hosted inference does not expire valid results.
+- No browser/cloud deployment: this remains a local desktop application. No license
+  assigned to owner-authored source; commercial model use remains an owner decision.

@@ -9,15 +9,16 @@ Coordinate chain (all explicit, all tested):
 """
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, field
-import hashlib
+import math
 from pathlib import Path
 from threading import Event
 import time
-from urllib.request import urlopen
 
 import cv2
 import numpy as np
 import onnxruntime as ort
+
+from model_assets import check_cancelled, ensure_asset
 
 MODEL_DIR = Path(__file__).with_name("models") / "edgesam"
 REVISION = "e0564124628944e1622973d4e0f68158b46f035a"
@@ -31,40 +32,13 @@ PIXEL_STD = np.array([58.395, 57.12, 57.375], np.float32)
 POSITIVE, NEGATIVE, BOX_TOP_LEFT, BOX_BOTTOM_RIGHT, PADDING = 1, 0, 2, 3, -1
 
 
-def check_cancelled(cancel):
-    if cancel is not None and cancel.is_set():
-        raise CancelledError("Segmentation cancelled")
-
-
 def ensure_models(directory, cancel=None):
     """Download revision-pinned files once and verify SHA-256; never trust partial files."""
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
     for name, digest in MODEL_FILES.items():
-        check_cancelled(cancel)
         path = directory / name
-        if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
-            continue
-        temporary = path.with_suffix(".download")
         url = f"https://huggingface.co/chongzhou/EdgeSAM/resolve/{REVISION}/{name}"
-        try:
-            print(f"Downloading {name} (about 20 MB)...", flush=True)
-            started = time.monotonic()
-            with urlopen(url, timeout=5) as response, temporary.open("wb") as output:
-                while chunk := response.read1(64 * 1024):
-                    check_cancelled(cancel)
-                    if time.monotonic() - started > 180:
-                        raise TimeoutError(f"Model download exceeded 180 seconds: {name}")
-                    output.write(chunk)
-            if hashlib.sha256(temporary.read_bytes()).hexdigest() != digest:
-                raise RuntimeError(f"Model checksum failed: {name}")
-            temporary.replace(path)
-        except OSError as error:
-            raise RuntimeError(
-                f"EdgeSAM model {name} is missing and could not be downloaded ({error}). "
-                f"Connect to the internet once, or place the file in {directory}.") from error
-        finally:
-            temporary.unlink(missing_ok=True)
+        ensure_asset(path, url, digest, cancel=cancel)
 
 
 def preprocess(frame):
@@ -119,6 +93,7 @@ class Candidate:
     borders: int = 0           # image edges the mask runs along (surfaces touch 2+)
     person_overlap: float = 0.0  # fraction of the mask that is the user's body
     rank_reason: str = ""
+    selectable: bool = True    # set by ranking; rejected masks are debug-only
 
 
 @dataclass
@@ -184,7 +159,12 @@ def rank_candidates(candidates, max_area=.30):
     stable (measured 0.87 for two touching bags vs 0.98 for one bag).
     """
     def allowed(c):   # hard filters: never the hand, the user's body, or a surface
-        return (c.area <= max_area and c.borders <= 1 and c.person_overlap < .6)
+        return (0 < c.area <= max_area and c.borders <= 1 and c.person_overlap < .6
+                and c.hand_overlap < .5 and math.isfinite(c.score)
+                and math.isfinite(c.stability))
+
+    for c in candidates:
+        c.selectable = allowed(c)
 
     plausible = [i for i, c in enumerate(candidates) if allowed(c) and c.hand_overlap < .25
                  and c.stability >= .75 and c.score >= .55]
@@ -197,9 +177,9 @@ def rank_candidates(candidates, max_area=.30):
                              if c.person_overlap >= .6 else "covers hand")
         return None
     best = max(candidates[i].score for i in plausible)
-    steady = max(candidates[i].stability for i in plausible)
-    near = [i for i in plausible if candidates[i].score >= best - .15
-            and candidates[i].stability >= steady - .08]
+    competitive = [i for i in plausible if candidates[i].score >= best - .15]
+    steady = max(candidates[i].stability for i in competitive)
+    near = [i for i in competitive if candidates[i].stability >= steady - .08]
     choice = max(near, key=lambda i: candidates[i].area)
     for i, c in enumerate(candidates):
         c.rank_reason = ("chosen: largest steady" if i == choice else
@@ -390,6 +370,9 @@ class SegmentationWorker:
                 result = None
             except Exception as error:     # surfaced on screen; the camera loop keeps running
                 self.error = f"{type(error).__name__}: {error}"
+                self.ready = False
+                self.pending = None
+                print(f"Segmentation unavailable: {self.error}", flush=True)
             self.future = None
             if result is not None:
                 self.last_encoder_ms = result[1].encoder_ms or self.last_encoder_ms
@@ -400,7 +383,13 @@ class SegmentationWorker:
         return result
 
     def retry(self):
+        if self.future is not None:
+            return
         self.error = None
+        self.pending = None
+        self.ready = False
+        self.model = None
+        self.warm_up()
 
     def close(self):
         self.pending = None

@@ -111,19 +111,18 @@ class AppFlowTests(unittest.TestCase):
         from segmentation import SegmentationWorker
         self.scene, self.truth = desk_scene()
         self.worker = SegmentationWorker(threads=4)
+        self.addCleanup(self.worker.close)
         self.worker.warm_up()
         self.app = App(640, 480, self.worker, parse_args([]))
+        self.addCleanup(self.app.close)
         self.t = 0.0
         self.out = None
         self.last = None
-        self.wait(lambda: self.worker.model is not None, 60)
+        self.assertTrue(self.wait(lambda: self.worker.ready, 60), "model startup timed out")
 
-    def tearDown(self):
-        self.app.close()
-        self.worker.close()
-
-    def frame(self, hands=(), scene=None, dt=1 / 25):
+    def frame(self, hands=(), scene=None, dt=1 / 25, pace=False):
         """One app step. hands: list of (landmarks, label)."""
+        started = time.perf_counter()
         self.t += dt
         frame = (self.scene if scene is None else scene).copy()
         person = np.zeros((480, 640), np.float32)
@@ -131,16 +130,20 @@ class AppFlowTests(unittest.TestCase):
             person[draw_hand(frame, points)] = 1.0     # stands in for a perfect person mask
         self.last = frame
         self.out = self.app.step(frame, self.t, dt, [hand_obs(p, l) for p, l in hands], person)
-        time.sleep(.004)
+        time.sleep(max(0, dt - (time.perf_counter() - started)) if pace else .004)
         return self.out
 
     def wait(self, condition, seconds=15, hands=()):
-        end = time.time() + seconds
-        while time.time() < end:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if self.worker.error:
+                self.fail(f"model failed: {self.worker.error}")
             if condition():
                 return True
             if hasattr(self, "app"):
-                self.frame(hands)
+                # Match simulated time to wall time while waiting for real inference.
+                # Fast synthetic time must not expire an otherwise valid model result.
+                self.frame(hands, pace=True)
             else:
                 time.sleep(.02)
         return condition()
