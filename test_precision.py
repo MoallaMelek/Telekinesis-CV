@@ -20,7 +20,10 @@ class OwnershipTests(unittest.TestCase):
         borrowed = np.ones((10, 12), np.float32)
         result = SimpleNamespace(confidence_masks=[Mock(numpy_view=Mock(return_value=borrowed))])
         segmenter.model = Mock(segment_for_video=Mock(return_value=result))
-        owned = segmenter.segment(np.zeros((10, 12, 3), np.uint8), 0)
+        # This is an offline ownership test, not MediaPipe native initialization.
+        # Headless Linux runners may not have its optional GLES runtime installed.
+        with patch('scene.mp.Image', return_value=Mock()):
+            owned = segmenter.segment(np.zeros((10, 12, 3), np.uint8), 0)
         self.assertFalse(np.shares_memory(owned, borrowed))
         borrowed[:] = 0
         self.assertTrue(owned.all())
