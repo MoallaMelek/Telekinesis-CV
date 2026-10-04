@@ -76,19 +76,21 @@ class RankingTests(unittest.TestCase):
         merged = candidate(rect_mask(100, 100, 230, 220), score=.86, stability=.87)
         self.assertEqual(rank_candidates([single, merged]), 0)
 
-    def test_surfaces_hand_and_huge_masks_rejected(self):
+    def test_surfaces_and_huge_masks_rejected_but_hull_is_not_a_veto(self):
         desk = candidate(rect_mask(0, 380, 640, 480), score=.95)   # touches 3 borders
         hand = candidate(rect_mask(300, 200, 360, 300), overlap=.6)
         huge = candidate(rect_mask(20, 20, 620, 460))
-        self.assertIsNone(rank_candidates([desk, hand, huge]))
+        self.assertEqual(rank_candidates([desk, hand, huge]), 1)
+        self.assertTrue(hand.selectable)
         self.assertEqual(desk.rank_reason, "surface (touches borders)")
 
-    def test_users_body_is_never_the_object(self):
+    def test_body_hint_prefers_unoccluded_candidate_without_vetoing_held_objects(self):
         torso = candidate(rect_mask(200, 150, 440, 470))
         torso.person_overlap = .9
         mug = candidate(rect_mask(100, 300, 150, 360))
         self.assertEqual(rank_candidates([torso, mug]), 1)
-        self.assertEqual(torso.rank_reason, "your body (person mask)")
+        self.assertTrue(torso.selectable)
+        self.assertEqual(rank_candidates([torso]), 0)
 
     def test_clean_mask_keeps_prompted_component_and_fills_holes(self):
         m = rect_mask(100, 100, 200, 200)

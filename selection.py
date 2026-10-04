@@ -139,6 +139,23 @@ def negative_prompts(points):
     return [tuple(points[i]) for i in (6, 9, 4)]
 
 
+def hand_core(shape, hands):
+    """Anatomical palm/finger hint without the convex finger gaps or imagined forearm."""
+    core = np.zeros(shape[:2], np.uint8)
+    for points in hands:
+        if points is None or not np.isfinite(points).all():
+            continue
+        p = np.rint(points).astype(np.int32)
+        palm = float(np.linalg.norm(points[0] - points[9]))
+        cv2.fillConvexPoly(core, cv2.convexHull(p[[0, 1, 5, 9, 13, 17]]), 1)
+        width = max(3, int(palm * .12))
+        for chain in ((1, 2, 3, 4), (5, 6, 7, 8), (9, 10, 11, 12),
+                      (13, 14, 15, 16), (17, 18, 19, 20)):
+            for a, b in zip(chain, chain[1:]):
+                cv2.line(core, tuple(p[a]), tuple(p[b]), 1, width)
+    return core.astype(bool)
+
+
 class Selector:
     """AIMING -> ANALYZING -> PREVIEW; latches while the user is pinching.
 
@@ -165,6 +182,7 @@ class Selector:
         self.state = "IDLE"
         self.version = 0               # bumps whenever the visible candidate changes
         self.submitted_at = None
+        self.pinned = False            # corrected snapshot persists until confirmation
         self.latency_ms = None         # aim settled -> preview shown (measured)
 
     @property
@@ -186,11 +204,27 @@ class Selector:
         self.state = state
         self.expected_snapshot = None
         self.version += 1
+        self.pinned = False
 
     def reset_dwell(self, now):
         """Unobserved time (camera gap) must not count as a steady aim."""
         if self.anchor is not None and not self.sent:
             self.anchor_since = now
+
+    def prompt(self, now, frame, positives=(), negatives=(), box=None,
+               hands=(), zone=None, embedding=None, explicit=False):
+        """An intentional click/correction bypasses dwell; stale results stay rejected."""
+        self.clear("ANALYZING")
+        self.submitted_at = self.last_seen = now
+        if embedding is None:
+            self.snapshot_id += 1
+        snapshot = self.snapshot_id if embedding is None else embedding.snapshot_id
+        self.expected_snapshot = snapshot
+        self.sent = True
+        return Job("select", snapshot, self.prompt_id, frame=frame if embedding is None else None,
+                   embedding=embedding, positives=tuple(positives), negatives=tuple(negatives),
+                   box=box, hand_points=tuple(hands), hand_zone=zone, captured_at=now,
+                   explicit=explicit)
 
     def cycle(self, now=None):
         """Show the next alternative outline (ordered by size, wrapping around)."""
@@ -218,6 +252,8 @@ class Selector:
         blocked: callable (x, y) -> True where selection is not allowed (hidden originals);
         engaged: the aiming input has started a pinch -> freeze the target.
         """
+        if self.pinned:
+            return None
         if aim is None:
             if self.state == "AIMING":
                 self.state = "IDLE"    # nothing was submitted; nothing to keep

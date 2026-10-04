@@ -8,7 +8,7 @@ ORANGE = (60, 170, 255)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 KEYS = ("Esc release / R reset / H hide / C duplicate / Z freeze / M outline / "
         "Tab next / X clear all / B background / P clean plate / O occlusion / "
-        "T twist / D debug / K help / F fullscreen / E retry / Q quit")
+        "S precise selection / T twist / D debug / K help / F fullscreen / E retry / Q quit")
 
 
 def wrap_text(message, width, scale=.45, max_lines=3):

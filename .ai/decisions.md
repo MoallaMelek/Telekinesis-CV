@@ -39,3 +39,18 @@
 - Retain model and architecture. Synthetic dark/noisy bottle overlap rose .887 to .958
   with lighting preparation; shadowed bottle .959 to .992 with focused decoding. These
   examples do not establish general-world accuracy.
+
+2026-10-05 (Codex desktop) — General selection and native ownership correction:
+- Human webcam testing invalidated the prior hard hand/body/quality veto strategy.
+  Treat selfie foreground and anatomical hand cores as soft evidence; show uncertain
+  masks for deliberate confirmation. No object-class special cases.
+- Intentional clicks submit immediately; movement alone cannot steal a real hand's
+  control. Re-click retries failed targets without needing to move outside a small object.
+- S freezes raw pixels for box/include/exclude correction with cached encoding and stale
+  prompt rejection. Enter pins the preview until confirmation; Backspace undoes edits.
+- Preserve every included component and skip automatic silhouette refinement on corrected
+  objects. Selected pixel ownership overrides false selfie foreground downstream.
+- Copy MediaPipe's borrowed selfie buffers explicitly before native results are released.
+  A local diagnostic reproduced the memory access violation before this fix.
+- Preserve EdgeSAM CPU inference and avoid costly new models/cloud/class-based detectors.
+  General prompting supplies missing intent; it cannot guarantee perfect segmentation.

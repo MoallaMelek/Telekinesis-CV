@@ -140,10 +140,10 @@ class RankingRecoveryTests(unittest.TestCase):
         logits[50:90, 50:90] = .5
         self.assertEqual(stability_score(logits, support=support), before)
 
-    def test_low_confidence_background_is_not_selectable(self):
+    def test_uncertain_outline_remains_available_for_deliberate_confirmation(self):
         weak = candidate(rect_mask(20, 20, 140, 150), score=.50, stability=.68)
-        self.assertIsNone(rank_candidates([weak]))
-        self.assertFalse(weak.selectable)
+        self.assertEqual(rank_candidates([weak]), 0)
+        self.assertTrue(weak.selectable)
 
     def test_lighting_preparation_keeps_original_pixels_untouched(self):
         frame = np.full((60, 80, 3), 20, np.uint8)
@@ -165,7 +165,7 @@ class RankingRecoveryTests(unittest.TestCase):
         whole = candidate(rect_mask(80, 80, 180, 200), score=.60, stability=.99)
         self.assertEqual(rank_candidates([crisp_part, whole]), 0)
 
-    def test_cycle_never_selects_body_surface_or_hand(self):
+    def test_cycle_offers_ambiguous_foreground_but_not_rejected_surfaces(self):
         good = candidate(rect_mask(80, 80, 180, 200))
         hand = candidate(rect_mask(240, 240, 300, 340), overlap=.7)
         body = candidate(rect_mask(300, 180, 400, 400))
@@ -176,9 +176,12 @@ class RankingRecoveryTests(unittest.TestCase):
         selector = Selector()
         selector.result = MaskResult(1, 1, (100, 100), masks, choice, 0, 0, 0)
         selector.choice = choice
+        visited = set()
         for t in range(8):
             selector.cycle(t)
-            self.assertIs(selector.candidate, good)
+            self.assertIsNot(selector.candidate, surface)
+            visited.add(selector.choice)
+        self.assertEqual(visited, {0, 1, 2})
 
     def test_all_rejected_cannot_be_revived_by_cycle(self):
         masks = [candidate(rect_mask(0, 0, 640, 480))]
@@ -269,7 +272,7 @@ class AppControlTests(unittest.TestCase):
         m.update_objects(1.2, .1)
         self.assertAlmostEqual(self.obj.scale, 1.1)
 
-    def test_refinement_rejects_body_even_if_overlap_is_high(self):
+    def test_refinement_keeps_object_even_if_selfie_foreground_covers_it(self):
         app = self.app
         mask = rect_mask(100, 100, 140, 140)
         group, sprite = app.extract(textured(), mask, 1, 1)
@@ -282,7 +285,7 @@ class AppControlTests(unittest.TestCase):
         result = MaskResult(1000001, 1000001, (120, 120), [rejected], None, 0, 0, 0,
                             fake_embedding(textured(), 1000001, 1))
         app.finish_refine(result, 2)
-        self.assertEqual(app.counters["refine_rejected"], 1)
+        self.assertEqual(app.counters["refine_accepted"], 1)
         self.assertIs(group.mask, mask)
 
     def test_retry_clears_stale_selection(self):

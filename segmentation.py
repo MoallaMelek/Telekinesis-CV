@@ -108,6 +108,7 @@ class MaskResult:
     decoder_ms: float
     total_ms: float
     embedding: Embedding = field(repr=False, default=None)
+    explicit: bool = False
 
 
 def stability_score(logits, offset=1.0, support=None):
@@ -118,15 +119,17 @@ def stability_score(logits, offset=1.0, support=None):
     return float(high.sum() / max(low.sum(), 1))
 
 
-def clean_mask(mask, point=None):
+def clean_mask(mask, point=None, positives=()):
     """Keep the connected component at the prompt (or the largest), fill small holes."""
     mask = mask.astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if count <= 1:
         return mask.astype(bool)
-    keep = None
-    if point is not None:
-        x, y = int(round(point[0])), int(round(point[1]))
+    kept = set()
+    targets = ([point] if point is not None else []) + list(positives)
+    for target in targets:
+        keep = None
+        x, y = int(round(target[0])), int(round(target[1]))
         h, w = mask.shape
         if 0 <= x < w and 0 <= y < h and labels[y, x] > 0:
             keep = int(labels[y, x])
@@ -137,16 +140,19 @@ def clean_mask(mask, point=None):
             if len(xs):
                 closest = np.argmin((xs + x0 - x) ** 2 + (ys + y0 - y) ** 2)
                 keep = int(window[ys[closest], xs[closest]])
-    if keep is None:
-        keep = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    main = labels == keep
+        if keep is not None:
+            kept.add(keep)
+    if not kept:
+        kept.add(1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA])))
+    keep = max(kept, key=lambda i: stats[i, cv2.CC_STAT_AREA])
+    main = np.isin(labels, list(kept))
     # Keep adjacent fragments such as a split handle, never a distant neighbour.
     # Measure proximity to the ORIGINAL component so fragments cannot form a chain.
     area = stats[keep, cv2.CC_STAT_AREA]
     gap = int(np.clip(max(stats[keep, cv2.CC_STAT_WIDTH], stats[keep, cv2.CC_STAT_HEIGHT]) * .03, 3, 8))
     nearby = cv2.dilate(main.astype(np.uint8), np.ones((2 * gap + 1, 2 * gap + 1), np.uint8)) > 0
     for i in range(1, count):
-        if (i != keep and .03 * area <= stats[i, cv2.CC_STAT_AREA] <= .50 * area
+        if (i not in kept and .03 * area <= stats[i, cv2.CC_STAT_AREA] <= .50 * area
                 and (nearby & (labels == i)).any()):
             main |= labels == i
     # Repair tiny speckles only; preserve genuine holes (handles, loops, gaps).
@@ -161,7 +167,7 @@ def clean_mask(mask, point=None):
     return main
 
 
-def rank_candidates(candidates, max_area=.30):
+def rank_candidates(candidates, max_area=.30, explicit=False):
     """Choose the whole object, not the most confident part - nor two merged objects.
 
     SAM's predicted IoU is highest for small, crisp parts (a label, a truck's door).
@@ -172,39 +178,37 @@ def rank_candidates(candidates, max_area=.30):
     two neighbouring objects: the seam between them is uncertain, so merges are less
     stable (measured 0.87 for two touching bags vs 0.98 for one bag).
     """
-    def allowed(c):   # hard filters: never the hand, the user's body, or a surface
-        return (0 < c.area <= max_area and c.borders <= 1 and c.person_overlap < .6
-                and c.hand_overlap < .5 and math.isfinite(c.score)
-                and math.isfinite(c.stability) and c.score >= .50 and c.stability >= .70)
+    def allowed(c):
+        # Selfie foreground and landmark hulls are approximate, not object identity.
+        # Held objects and things beneath the forearm often overlap these regions.
+        return (0 < c.area <= max_area and (explicit or c.borders <= 1)
+                and math.isfinite(c.score) and math.isfinite(c.stability))
 
     for c in candidates:
         c.selectable = allowed(c)
 
-    plausible = [i for i, c in enumerate(candidates) if allowed(c) and c.hand_overlap < .25
-                 and c.stability >= .75 and c.score >= .55]
-    if not plausible:
-        plausible = [i for i, c in enumerate(candidates) if allowed(c) and c.hand_overlap < .5]
+    plausible = [i for i, c in enumerate(candidates) if allowed(c)]
     if not plausible:
         for c in candidates:
             c.rank_reason = ("too large" if c.area > max_area else "surface (touches borders)"
-                             if c.borders > 1 else "your body (person mask)"
-                             if c.person_overlap >= .6 else "covers hand"
-                             if c.hand_overlap >= .5 else "uncertain mask")
+                             if c.borders > 1 else "invalid mask")
         return None
-    best = max(candidates[i].score for i in plausible)
-    competitive = [i for i in plausible if candidates[i].score >= best - .15]
+    def quality(c):
+        # Only overlapping BOTH hints is evidence of skin; neither is a veto.
+        prior = min(c.hand_overlap, c.person_overlap)
+        return c.score - (0 if explicit else .10 * c.hand_overlap + .15 * c.person_overlap + .10 * prior)
+    best = max(quality(candidates[i]) for i in plausible)
+    competitive = [i for i in plausible if quality(candidates[i]) >= best - .10]
     steady = max(candidates[i].stability for i in competitive)
-    near = [i for i in competitive if candidates[i].stability >= steady - .08]
+    near = [i for i in competitive if candidates[i].stability >= steady - .05]
     choice = max(near, key=lambda i: candidates[i].area)
     for i, c in enumerate(candidates):
         c.rank_reason = ("chosen: largest steady" if i == choice else
                          "too large" if c.area > max_area else
                          "surface (touches borders)" if c.borders > 1 else
-                         "your body (person mask)" if c.person_overlap >= .6 else
-                         "covers hand" if c.hand_overlap >= .25 else
-                         "uncertain mask" if not c.selectable else
-                         "unstable edges" if c.stability < steady - .08 else
-                         "low score" if c.score < best - .15 else "smaller part")
+                         "invalid mask" if not c.selectable else
+                         "less stable" if c.stability < steady - .05 else
+                         "lower confidence" if quality(c) < best - .10 else "smaller part")
     return choice
 
 
@@ -263,14 +267,17 @@ class EdgeSAM:
         for low, score in zip(masks[0], scores[0]):
             logits = restore_logits(low, embedding.resized_size, size)
             mask = logits > 0          # logit 0 == probability 0.5
-            if anchor is not None:
-                x, y = int(round(anchor[0])), int(round(anchor[1]))
-                near = mask[max(0, y - 6):y + 7, max(0, x - 6):x + 7]
-                if not near.any():
-                    continue            # The model answered a different question.
-            mask = clean_mask(mask, anchor)
+            agrees = True
+            for point in positives:
+                x, y = int(round(point[0])), int(round(point[1]))
+                if not mask[max(0, y - 6):y + 7, max(0, x - 6):x + 7].any():
+                    agrees = False
+                    break
+            if not agrees:
+                continue                # Never show a part that ignores an inclusion.
+            mask = clean_mask(mask, anchor, positives)
             area = float(mask.mean())
-            if area * mask.size < 60:
+            if mask.sum() < 4:
                 continue
             overlap = float((mask & embedding.hand_zone).sum() / max(mask.sum(), 1))
             body = (0.0 if embedding.person is None else
@@ -334,6 +341,7 @@ class Job:
     person: np.ndarray = None
     captured_at: float = 0.0
     max_area: float = .30
+    explicit: bool = False       # deliberate correction/box: no semantic vetoes
 
 
 class SegmentationWorker:
@@ -390,8 +398,8 @@ class SegmentationWorker:
             encoder_ms = 0.0
         decoding = time.perf_counter()
         candidates = self.model.decode(embedding, job.positives, job.negatives, job.box)
-        choice = rank_candidates(candidates, job.max_area) if candidates else None
-        if job.kind == "select" and choice is not None:
+        choice = rank_candidates(candidates, job.max_area, job.explicit) if candidates else None
+        if job.kind == "select" and choice is not None and not job.explicit:
             coarse = candidates[choice]
             refined = self.model.refine_candidate(embedding, coarse, job.positives, job.negatives, job.max_area)
             if refined is not coarse:
@@ -406,7 +414,7 @@ class SegmentationWorker:
         point = tuple(job.positives[0]) if job.positives else None
         return job.kind, MaskResult(job.snapshot_id, job.prompt_id, point, candidates, choice,
                                     encoder_ms, decoder_ms,
-                                    (time.perf_counter() - started) * 1000, embedding)
+                                    (time.perf_counter() - started) * 1000, embedding, job.explicit)
 
     def poll(self):
         """Return (kind, MaskResult) when a job finished, else None. Never blocks."""

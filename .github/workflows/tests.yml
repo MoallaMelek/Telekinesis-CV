@@ -30,8 +30,8 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements.txt
       - run: python -m pip check
-      - run: python -m compileall -q main.py hand_tracker.py manipulation.py segmentation.py selection.py scene.py hud.py model_assets.py lighting.py tools
-      - run: python -m unittest test_core test_selection test_reliability
+      - run: python -m compileall -q main.py hand_tracker.py manipulation.py segmentation.py selection.py scene.py hud.py model_assets.py lighting.py precision.py tools
+      - run: python -m unittest test_core test_selection test_reliability test_precision
 
   real-model:
     name: Real EdgeSAM interactions
@@ -51,3 +51,4 @@ jobs:
       - run: python tools/prepare_models.py --segmentation-only
       - run: python -m unittest test_pipeline
       - run: python tools/fixture_demo.py .cache/fixture-demo.jpg
+      - run: python tools/precision_demo.py .cache/precision-demo.jpg

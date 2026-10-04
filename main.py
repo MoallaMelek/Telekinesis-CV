@@ -18,7 +18,8 @@ from manipulation import Group, Manipulator, Sprite, render_sprite
 from scene import (ObjectTracker, PersonSegmenter, Reconstruction, SceneMemory, bbox_of,
                    feathered_alpha, make_inpainter)
 from segmentation import MODEL_DIR, Job, SegmentationWorker, iou
-from selection import Selector, hand_zone, negative_prompts
+from selection import Selector, hand_zone, hand_core, negative_prompts
+from precision import SelectionEditor
 from hud import draw_hud
 
 WINDOW = "Telekinesis CV | Reality Manipulation"
@@ -60,7 +61,9 @@ class App:
                                  args.min_scale, args.max_scale)
         self.memory = SceneMemory()
         self.inpainter = make_inpainter()
-        self.snapshots = {}            # snapshot id -> hand pixels (person seg within hand zone)
+        self.editor = None
+        self.clicked = None            # intentional mouse request, independent of dwell
+        self.mouse_until = -1.0
         self.pending_lock = None       # (slot, deadline) pinch arrived before the mask did
         self.refining = None           # (group id, snapshot id, submitted time)
         self.refine_counter = 10 ** 6  # refine jobs use their own id range
@@ -102,12 +105,14 @@ class App:
         hands = self.manip.hands
         if any(h.held is not None for h in hands):
             return None                # while holding, a 2nd-hand pinch means scale/rotate
-        if self.mouse["point"] is not None and now - self.mouse["moved"] < 1.5 and hands[2].held is None:
+        if self.mouse["point"] is not None and now < self.mouse_until and hands[2].held is None:
             return 2
         eligible = [s for s in (0, 1) if hands[s].present and hands[s].held is None]
         if self.pointer_slot in eligible:
             return self.pointer_slot
-        return eligible[0] if eligible else None
+        if eligible:
+            return eligible[0]
+        return 2 if self.mouse["point"] is not None else None
 
     # ------------------------------------------------------------------ main step
     def person(self):
@@ -126,6 +131,8 @@ class App:
             self.started = now
         h, w = frame.shape[:2]
         self._shape, self._person_source, self._person = (h, w), person, None
+        if self.editor is not None:
+            return self.edit_step(now)
         if dt > .25:
             self.selector.reset_dwell(now)
         mouse = self.mouse if self.mouse["point"] is not None else None
@@ -133,6 +140,7 @@ class App:
         hands = self.manip.hands
         hand_points = [hands[s].points for s in (0, 1) if hands[s].present]
         zone = hand_zone((h, w), hand_points)
+        core = hand_core((h, w), hand_points)
         self.last_frame, self.last_zone = frame, zone
         if self.manip.objects or self.debug:
             person = self.person()     # occlusion, reconstruction and tracking need it
@@ -149,18 +157,21 @@ class App:
         hovering = None if aim is None else self.manip.hit(aim)
         negatives = [p for pts in hand_points for p in negative_prompts(pts)]
         job = None
-        if not self.worker.error and (self.worker.ready or self.worker.model is not None):
+        if self.clicked is not None:
+            point, self.clicked = self.clicked, None
+            if not self.blocked(*point) and not self.worker.error:
+                job = self.selector.prompt(now, frame, [point], negatives=negatives,
+                                           hands=hand_points, zone=core)
+                # First click requests an outline. A second click/pinch confirms it.
+                events = [(s, e) for s, e in events if s != 2]
+        elif not self.worker.error and (self.worker.ready or self.worker.model is not None):
             job = self.selector.update(now, None if hovering else aim, frame, hand_points,
-                                       zone, self.blocked, engaged, negatives=negatives)
+                                       core, self.blocked, engaged, negatives=negatives)
         if job is not None:
             job.max_area = self.args.max_area
             if job.frame is not None:
-                # Real hand pixels in THIS snapshot, later removed from the cut-out; the
-                # person mask also stops the user's own body being chosen as the object.
+                # Approximate foreground is a ranking hint, never object ownership.
                 job.person = self.person() > .5
-                self.snapshots[job.snapshot_id] = job.person & zone
-                for old in [k for k in self.snapshots if k < job.snapshot_id - 3]:
-                    self.snapshots.pop(old)
             self.worker.request(job)
 
         polled = self.worker.poll()
@@ -195,13 +206,13 @@ class App:
 
         # 3) Track the physical originals; refine the cut-out once the hand is away.
         if self.groups():
-            person = self.person()
-            occluder = (person > .5) | zone
+            person = self.scene_person(core)
+            occluder = (person > .5) | core
             for group in self.groups():
                 group.tracker.update(frame, occluder, now)
-            self.schedule_refine(frame, zone, now)
+            self.schedule_refine(frame, core, now)
         self.manip.update_objects(now, dt)
-        person = self.person() if self.manip.objects or self.debug else None
+        person = self.scene_person(core) if self.manip.objects else self.person() if self.debug else None
 
         # 4) Composite: live -> reconstructed originals -> sprites -> hands in front.
         out = frame.copy()
@@ -215,7 +226,7 @@ class App:
                 dirty.append(rect)
         if self.occlusion != "off" and dirty:
             if self.occlusion == "hands":
-                soft_zone = cv2.GaussianBlur(zone.astype(np.float32), (15, 15), 0)
+                soft_zone = cv2.GaussianBlur(core.astype(np.float32), (9, 9), 0)
                 fg = person * soft_zone
             else:
                 fg = person
@@ -224,6 +235,14 @@ class App:
                 out[y0:y1, x0:x1] = (out[y0:y1, x0:x1] * (1 - a) + frame[y0:y1, x0:x1] * a).astype(np.uint8)
         self.draw_feedback(out, frame, now, aim, hovering, person, zone)
         return out
+
+    def scene_person(self, core):
+        """A selected object's pixels take precedence over coarse selfie foreground."""
+        person = self.person().copy()
+        for group in self.groups():
+            mask = shifted(group.mask, group.tracker.offset)
+            person[mask & ~core] = 0
+        return person
 
     # ------------------------------------------------------------------ events
     def handle(self, slot, event, now):
@@ -280,11 +299,8 @@ class App:
         embedding = result.embedding
         snap = embedding.frame
         mask = candidate.mask.copy()
-        hand_pixels = self.snapshots.get(result.snapshot_id)
-        if hand_pixels is not None:
-            trimmed = mask & ~cv2.dilate(hand_pixels.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
-            if trimmed.sum() >= .4 * mask.sum():
-                mask = trimmed         # exclude the selecting hand's pixels from the cut-out
+        # Trust the confirmed silhouette. Selfie masks/hulls cannot distinguish an
+        # object held in front of a person from skin; trimming them destroys objects.
         for group in self.groups():
             if iou(mask, shifted(group.mask, group.tracker.offset)) > .5:
                 self.say("That object is already extracted - pinch its image instead", now)
@@ -293,6 +309,9 @@ class App:
         self.next_group += 1
         group, sprite = self.extract(snap, mask, now, self.next_group)
         group.snapshot_id = result.snapshot_id
+        if result.explicit:
+            group.refined = True
+            group.refine = "User-corrected silhouette; automatic refinement disabled"
         group.score, group.stability = candidate.score, candidate.stability
         obj = self.manip.add(group, sprite)
         self.manip.grab(slot, obj, now)
@@ -400,6 +419,27 @@ class App:
 
     # ------------------------------------------------------------------ keyboard / mouse
     def key(self, key, now):
+        if self.editor is not None:
+            if key == 27:
+                self.editor = None
+                self.cancel_selection()
+            elif key in (ord("e"), ord("E")) and self.worker.error:
+                self.worker.retry()
+                self.submit_edit(now)
+            elif key in (10, 13) and self.selector.candidate is not None and self.selector.state == "PREVIEW":
+                self.editor = None
+                self.selector.last_seen = now
+                self.selector.pinned = True
+                self.mouse.update(down=False)
+                for hand in self.manip.hands:
+                    hand.pinch.reset()
+                    hand.fist.since = hand.palm.since = None
+                self.say("Outline ready. Pinch it or click and drag to lift.", now)
+            elif key in (8, 127) and self.editor.undo():
+                self.submit_edit(now)
+            elif key in (ord("m"), ord("M")):
+                self.selector.cycle(now)
+            return
         obj = self.active()
         m = self.manip
         if key == 27:                                          # Esc
@@ -409,6 +449,14 @@ class App:
                 self.say("Released back to reality (original shown again)", now)
             else:
                 self.say("Selection cancelled", now)
+        elif key in (ord("s"), ord("S")) and self.last_frame is not None:
+            if any(o.holders for o in m.objects):
+                self.say("Place your object before precise selection.", now)
+                return
+            self.cancel_selection()
+            self.editor = SelectionEditor(self.last_frame)
+            self.mouse.update(down=False)
+            self.say("View paused. Draw a box around any object, or click inside it.", now, 4)
         elif key in (ord("r"), ord("R")) and obj is not None:
             m.reset(obj)
             self.say("Reset", now)
@@ -454,16 +502,75 @@ class App:
 
     def cancel_selection(self):
         self.selector.clear()
+        self.clicked = None
         self.pending_lock = None
         self.worker.discard_pending()
+
+    def submit_edit(self, now):
+        editor = self.editor
+        self.worker.discard_pending()
+        if not editor.has_prompt:
+            self.selector.clear()
+            return
+        job = self.selector.prompt(now, editor.frame, editor.positives, editor.negatives,
+                                   box=editor.box, embedding=editor.embedding, explicit=True)
+        job.max_area = .95
+        self.worker.request(job)
+
+    def edit_step(self, now):
+        editor = self.editor
+        polled = self.worker.poll()
+        if polled is not None and polled[0] == "select":
+            result = polled[1]
+            # Cache the same frozen image even when a newer correction supersedes it.
+            if result.embedding is not None and np.array_equal(result.embedding.frame, editor.frame):
+                editor.embedding = result.embedding
+            self.selector.accept(result, now)
+        out = editor.frame.copy()
+        if self.selector.mask is not None:
+            mask = self.selector.mask
+            out[mask] = (out[mask] * .75 + np.array(CYAN) * .25).astype(np.uint8)
+            contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(out, contours, -1, CYAN, 2)
+        box = editor.box
+        if editor.drag is not None and editor.cursor is not None:
+            box = (*editor.drag, *editor.cursor)
+        if box is not None:
+            cv2.rectangle(out, (box[0], box[1]), (box[2], box[3]), CYAN, 1)
+        for points, colour in ((editor.positives, GREEN), (editor.negatives, ORANGE)):
+            for x, y in points:
+                cv2.circle(out, (x, y), 5, (0, 0, 0), 3)
+                cv2.circle(out, (x, y), 4, colour, -1)
+        status = ("Selection unavailable. Esc to return; E to retry." if self.worker.error else
+                  "Finding outline... You can keep adding corrections." if self.selector.state == "ANALYZING" else
+                  "No outline yet. Draw a box, or click inside the object." if self.selector.mask is None else
+                  "Left click includes; right click excludes. Enter accepts this outline.")
+        draw_hud(out, status, "Precise selection / paused", stage=1,
+                 hint="Drag box / click include / right click exclude / Backspace undo / M outline / Enter done / Esc cancel")
+        return out
 
     def on_mouse(self, event, x, y, flags, _param=None):
         now = time.perf_counter() - (self.started_wall or 0)
         x, y = min(max(x, 0), self.width - 1), min(max(y, 0), self.height - 1)
+        if self.editor is not None:
+            point = self.editor.point(x, y)
+            if event == cv2.EVENT_MOUSEMOVE:
+                self.editor.cursor = point
+            elif event == cv2.EVENT_LBUTTONDOWN:
+                self.editor.drag = self.editor.cursor = point
+            elif event == cv2.EVENT_LBUTTONUP and self.editor.finish_drag(point):
+                self.submit_edit(now)
+            elif event == cv2.EVENT_RBUTTONDOWN and self.editor.exclude(point):
+                self.submit_edit(now)
+            return
         if event == cv2.EVENT_MOUSEMOVE:
             self.mouse.update(point=(x, y), moved=now)
         elif event == cv2.EVENT_LBUTTONDOWN:
             self.mouse.update(point=(x, y), down=True, moved=now)
+            self.mouse_until = now + 10
+            if (self.manip.hit((x, y)) is None and
+                    (self.selector.mask is None or not self.selector.mask[y, x])):
+                self.clicked = (x, y)
         elif event == cv2.EVENT_LBUTTONUP:
             self.mouse.update(point=(x, y), down=False, moved=now)
         elif event == cv2.EVENT_RBUTTONDOWN:
@@ -558,11 +665,11 @@ class App:
         if hidden:
             summary += f" / {hidden} hidden"
         holding = any(o.holders for o in m.objects)
-        stage = 3 if holding or m.objects else 2 if s.state == "PREVIEW" or self.pending_lock else 1
+        stage = 3 if holding else 2 if s.state == "PREVIEW" or self.pending_lock else 3 if m.objects else 1
         hint = ("Open fingers to place / R reset / K help / Q quit" if holding else
                 "R reset / H hide / Esc restore / K help / Q quit" if m.objects else
-                "M change outline / K help / Q quit" if s.state == "PREVIEW" else
-                "Mouse also works / K help / Q quit")
+                "M change outline / S precise selection / K help / Q quit" if s.state == "PREVIEW" else
+                "Click to select / S precise selection / K help / Q quit")
         self.hud_bottom = draw_hud(out, self.status(now), summary, message,
                                   bool(lost), self.show_keys and not self.debug, stage=stage, hint=hint)
         if self.debug:
@@ -582,13 +689,16 @@ class App:
         if self.pending_lock:
             return "Keep pinching. Your object is still being found..."
         if s.state == "PREVIEW":
-            return "Outline looks right? Pinch your thumb and index finger together."
+            c = s.candidate
+            if c.score < .50 or c.stability < .70:
+                return "Uncertain outline. Press S to correct it, or M for another outline."
+            return "Outline looks right? Pinch to lift, or click and drag. S corrects it."
         if s.state == "ANALYZING":
             return "Finding your object... Keep the target ring in place."
         if s.state == "AIMING":
             return "Keep the target ring on the object. Hold your finger still."
         if s.state == "NO_OBJECT":
-            return "No object found. Move the target ring to the object's centre."
+            return "No outline at this point. Click to retry, or S to frame the object."
         if m.objects:
             obj = self.active()
             if obj is not None and not obj.visible:

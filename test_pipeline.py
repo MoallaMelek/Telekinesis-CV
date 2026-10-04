@@ -85,6 +85,29 @@ class SegmentationQualityTests(unittest.TestCase):
             mask = self.select(self.scene, point)
             self.assertGreater(iou(mask, self.truth[name]), .85, name)
 
+    def test_arbitrary_shapes_remain_selectable_inside_false_foreground_hints(self):
+        from test_selection import textured
+        for index, colour in enumerate(((165, 180, 195), (90, 80, 65), (140, 170, 190))):
+            frame = textured(seed=25)
+            target = np.zeros(frame.shape[:2], np.uint8)
+            polygon = np.array([(170, 230), (220, 210), (255, 240), (240, 280), (185, 270)])
+            cv2.fillPoly(target, [polygon], 1)
+            frame[target > 0] = colour
+            e = self.model.encode(frame, hand_zone=np.ones(target.shape, bool))
+            e.person = np.ones(target.shape, bool)  # misleading selfie foreground
+            candidates = self.model.decode(e, [(210, 240)])
+            choice = rank_candidates(candidates)
+            self.assertIsNotNone(choice, index)
+            self.assertGreater(iou(candidates[choice].mask, target > 0), .85, index)
+
+    def test_box_and_point_corrections_reuse_encoding_and_isolate_target(self):
+        e = self.model.encode(self.scene)
+        candidates = self.model.decode(e, [(360, 300)], [(530, 300)], box=(285, 175, 430, 360))
+        choice = rank_candidates(candidates, .95, explicit=True)
+        self.assertIsNotNone(choice)
+        self.assertGreater(iou(candidates[choice].mask, self.truth['phone']), .90)
+        self.assertLess(iou(candidates[choice].mask, self.truth['bottle']), .01)
+
     def test_touch_with_hand_in_frame_excludes_hand(self):
         from selection import aim_point, hand_zone, negative_prompts
         for name, tip in (("mug", (165, 320)), ("phone", (365, 355)), ("bottle", (530, 345))):

@@ -55,7 +55,8 @@ Linux is covered by offline CI, not a claim of verified live-camera support.
 3. Pinch when the outline is right, move your hand, pause, and open your fingers to place it.
 4. Use **R** to reset or **Esc** to restore the physical object's unmodified appearance.
 
-For a reliable first try, hover and drag with the mouse. It drives the same selection
+For a reliable first try, click the object's visible body to request an outline, then
+click and drag the outlined object to lift it. It drives the same selection
 and manipulation pipeline and helps isolate a hand-tracking problem. The active object
 number, hidden count, and current action are shown above the camera view. Up to six
 extracted images (including duplicates) can exist at once; **Tab** changes the active one.
@@ -81,12 +82,33 @@ Progress rings show fist/palm actions before they fire. A single noisy frame nev
 triggers anything. The mouse is a fallback "hand": hover to aim, left-button = pinch,
 drag = move, fast drag + release = throw, right-click = next outline, wheel = scale,
 Ctrl+wheel = rotate. Use it to tell segmentation failures apart from hand-tracking ones.
+An initial click requests selection immediately, without needing to hover first. It never
+extracts an unseen outline: confirm the preview with a second click/drag or a pinch.
+Mouse movement alone does not take control away from a detected hand; clicking does.
+
+### When one point is ambiguous: precise selection
+
+Press **S** to pause the camera view. **Drag a box** around the whole object, or **left
+click** visible parts that belong to it. **Right click** regions to exclude them. Additional
+points correct the same snapshot, reusing its image encoding. **Backspace** undoes the
+last correction; **M** changes outlines. When the outline is right, press **Enter** to
+resume the camera, then pinch or click/drag to lift it. **Esc** cancels.
+
+This works through spatial prompts, with no object class list or special cases for mugs,
+paper, tools, or other categories. A single pixel can ambiguously mean a part, an entire
+object, or background. Corrections express that intent; no model can guarantee a perfect
+outline for every object in every scene. Keep the scene still while the view is paused.
+Confirmed corrections are preserved; automatic hand-free silhouette refinement will not
+overwrite their inclusion/exclusion choices.
+
+![Synthetic precise-selection demo: bounding box, include and exclude points](docs/precision.jpg)
 
 | Key | Action |
 | --- | --- |
 | Esc | Release the active object back to reality (original visible again) |
 | R | Reset active object · H hide/show · C duplicate · Z freeze/unfreeze (drop) |
 | M | Next candidate outline · Tab next object · X release all |
+| S | Precise selection: paused view, include/exclude points and box prompts |
 | B | Switch background fill (memory/plate · smooth fill · FSR texture guess) |
 | P | Capture a **clean plate** (only valid if you physically removed the objects) |
 | O | Occlusion in front of objects: hands → whole person → off |
@@ -98,8 +120,10 @@ Options: `--debug`, `--camera 1`, `--backend msmf`, `--hands auto|1|2`,
 `--headless --seconds 20` (metrics only).
 
 Esc also cancels an in-progress selection or early pinch, so a late model result cannot
-grab an object after cancellation. Only candidates passing the size, border, body, and
-hand safety filters can be cycled into a selectable outline.
+grab an object after cancellation. Point selection excludes oversized/background surface
+masks; precise selection allows deliberate edge/large-object prompts (up to 95% of the
+frame). Person and hand hints are soft evidence, never semantic vetoes. Uncertain outlines
+remain visible for correction and require confirmation; nonfinite/empty masks are rejected.
 
 ### Troubleshooting
 
@@ -107,7 +131,7 @@ hand safety filters can be cycled into a selectable outline.
 | --- | --- |
 | Camera cannot open | Close other camera apps, check the shutter and camera permissions, then try `--camera 1` or `--backend msmf`. |
 | Model unavailable | Read the console error, reconnect for downloads if necessary, then press **E**. Retry reloads the model without requiring a new aim. |
-| No outline / wrong outline | Aim near the object's centre; improve contrast; keep your hand clear of the object. Use **M** to cycle safe alternatives. |
+| No outline / wrong outline | Click a visible part to retry immediately; **M** chooses alternatives. **S** pauses the view for box/point corrections. |
 | Gestures feel unreliable | Start with open fingers so pinch can arm; try mouse controls to check segmentation separately. |
 | Slow interaction | Keep `--hands auto`, try `--no-person` or fewer `--threads`; **D** shows stage timings. Two hands and refinement cost more CPU. |
 | Tracking lost after a camera move | The last pose is deliberately held. Use **Esc** or **X**, steady the camera, and select again. |
@@ -155,7 +179,9 @@ switches to, another object.
 **Point prompts and the hand.** The prompt is placed slightly *ahead* of your fingertip
 along the finger (`selection.aim_point`), because the fingertip pixel is skin. The
 snapshot being segmented is the live frame *with your hand in it*, so points on your hand
-are sent as **negative** prompts and candidates overlapping the hand region are rejected.
+are sent as **negative** prompts. Anatomical palm/finger regions and selfie foreground are
+ranking hints only: they can overlap an object without its being skin. They never veto an
+otherwise usable outline, or automatically trim the confirmed cut-out.
 Transforms are explicit: BGR→RGB, SAM normalization, resize longest side to 1024,
 pad right/bottom; the 256² mask logits are upsampled, **the padding is cropped, then**
 resized back (`restore_logits`). Skipping the crop would stretch every mask.
@@ -164,8 +190,8 @@ resized back (`restore_logits`). Skipping the crop would stretch every mask.
 target, or the nearest foreground if the target is just outside the edge. It retains
 only nearby fragments (such as a separated handle), removes distant neighbours, and
 preserves genuine holes. Stability is measured around that object rather than across
-unrelated pixels. Low-confidence silhouettes stay unselectable instead of guessing a
-large background region. In dim scenes, gentle luminance contrast and gamma preparation
+unrelated pixels. Low-confidence silhouettes are labelled uncertain and can be corrected
+instead of silently discarded. In dim scenes, gentle luminance contrast and gamma preparation
 help the segmentation model; the live image, extracted sprite colours, and cached scene
 pixels remain original. Bright scenes bypass the adjustment.
 Before showing the default outline, one additional decoder pass uses a box around the
@@ -175,8 +201,8 @@ size, and has more stable edges. This adds decoder time, not another image encod
 
 **Choosing the whole object.** SAM returns several candidates (part / object / bigger).
 Its own quality score favours small crisp parts (a door over the whole truck), so
-`rank_candidates` drops implausible ones (huge, surfaces touching 2+ image borders,
-covering the hand), then prefers the **largest** candidate whose score and *stability*
+`rank_candidates` drops oversized/surface guesses for ordinary pointing and applies soft
+foreground penalties, then prefers the **largest** candidate whose adjusted score and *stability*
 (does the mask change if the logit threshold moves ±1?) are close to the best. Stability
 is what rejects a merge of two neighbouring objects (their seam is uncertain).
 
@@ -205,8 +231,10 @@ blurry/smeared patch with inpainting, and a visible seam if lighting changes a l
 **Occlusion.** MediaPipe's selfie segmenter gives a real per-pixel person mask (~5–35 ms
 here). Pixels that are *person* and near a *hand* are drawn in front of manipulated
 objects; the whole person can be put in front with O. The webcam gives no depth, so the
-layering is a rule (hands in front), not measured depth. Landmark hulls are used only to
-decide *which* person pixels count as hands, never as the segmentation itself.
+layering is a rule (hands in front), not measured depth. Anatomical palm/finger hints avoid
+the invented forearm and gaps between fingers. Selected-object pixels take precedence over
+selfie foreground during reconstruction/tracking; live finger/palm hints retain occlusion.
+Person masks own their memory before MediaPipe releases its native inference buffers.
 
 **Temporal gesture logic.** `PinchGesture` is a state machine
 `OPEN → PINCH_CANDIDATE → PINCHED → RELEASE_CANDIDATE → OPEN` with two thresholds
@@ -266,7 +294,7 @@ These prove the pipeline mechanics, **not** how it feels with your real hands an
 Fast offline tests do not need model files or a camera:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest test_core test_selection test_reliability
+.\.venv\Scripts\python.exe -m unittest test_core test_selection test_reliability test_precision
 .\.venv\Scripts\python.exe -m pip check
 ```
 
@@ -276,6 +304,7 @@ To run the full interaction suite instead of silently skipping missing-model tes
 .\.venv\Scripts\python.exe tools\prepare_models.py --segmentation-only
 .\.venv\Scripts\python.exe -m unittest discover -v
 .\.venv\Scripts\python.exe tools\fixture_demo.py .cache\fixture-demo.jpg
+.\.venv\Scripts\python.exe tools\precision_demo.py .cache\precision-demo.jpg
 ```
 
 The fixture demo has a time limit, reports model failures, and closes workers on failure.
@@ -284,6 +313,8 @@ on Windows and Linux plus the real-model interaction suite on Windows. Downloads
 explicitly before integration tests; a missing model is a CI failure, not a passing skip.
 
 `hud.py` owns width-aware camera feedback, `model_assets.py` owns download integrity,
+`precision.py` owns frozen-frame correction prompts; `test_precision.py` covers native-buffer
+ownership, click-first selection, foreground false positives and correction state/results.
 `lighting.py` owns inference-only dim-scene preparation, and `test_reliability.py` covers model recovery, corrupt downloads, rejected candidates,
 mouse controls, cancellation, delayed refinement and HUD sizing. Historical experiment
 records remain in `.ai/`; archived sources are not part of the active application.

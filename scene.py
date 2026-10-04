@@ -49,7 +49,9 @@ class PersonSegmenter:
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         result = self.model.segment_for_video(image, stamp)
         mask = result.confidence_masks[0].numpy_view()
-        return np.ascontiguousarray(mask.reshape(frame.shape[:2]), np.float32)
+        # numpy_view borrows MediaPipe's native buffer. Own it before `result` is
+        # released (or the segmenter is closed); ascontiguousarray may return a view.
+        return np.array(mask.reshape(frame.shape[:2]), dtype=np.float32, order="C", copy=True)
 
     def close(self):
         self.model.close()
