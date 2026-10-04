@@ -229,11 +229,14 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(len(app.manip.objects), 1)
         obj = app.manip.objects[0]
         self.assertEqual(obj.mode, "held")
-        start_offset = obj.position - app.manip.hands[0].grip
+        # Refinement may change the silhouette centroid while the image stays fixed.
+        # Compare the image transform relative to the grip, not that changing centroid.
+        start_offset = obj.position - obj.matrix()[:, :2] @ obj.home_position() - app.manip.hands[0].grip
         # Drag right by 250 px (the physical mug stays put in every raw frame).
         for i in range(1, 26):
             self.pinch((165 + 10 * i, 320), n=1)
-        np.testing.assert_allclose(obj.position - app.manip.hands[0].grip, start_offset, atol=2)
+        np.testing.assert_allclose(obj.position - obj.matrix()[:, :2] @ obj.home_position()
+                                   - app.manip.hands[0].grip, start_offset, atol=2)
         core = cv2.erode(mug.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)
         self.assertLess(self.red_fraction(self.out, core), .05, "original still visible")
         # Stationary release: stays where placed.
