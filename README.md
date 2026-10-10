@@ -20,6 +20,8 @@ with drawn hands. It is a reproducible illustration, not a recording of webcam p
 Windows, Python 3.13 (tested on an i7-1355U, Iris Xe, no CUDA):
 
 ```powershell
+git clone https://github.com/MoallaMelek/Telekinesis-CV.git
+cd Telekinesis-CV
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\START.cmd              # or: .\run.ps1 --debug
