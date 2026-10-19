@@ -49,6 +49,17 @@ use Python 3.13, create the same environment, install `requirements.txt`, and ru
 `python main.py` from that environment. Windows is the primary interactive target;
 Linux is covered by offline CI, not a claim of verified live-camera support.
 
+### Check the Python environment
+
+If startup reports a missing module after installation, check the same interpreter used by `START.cmd`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -c "import cv2, mediapipe, numpy, onnxruntime; print('Core imports OK')"
+```
+
+These checks need no camera and do not download models. A successful import confirms dependency loading only; use the first-interaction steps below to verify tracking and selection.
+
 ### First successful interaction
 
 1. Keep the camera fixed and place a distinct, opaque object on a contrasting surface.
